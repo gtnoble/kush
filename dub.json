@@ -1,0 +1,18 @@
+{
+    "name": "peridynamics",
+    "description": "A generic peridynamics framework in D",
+    "authors": ["researcher"],
+    "copyright": "Copyright © 2025",
+    "targetType": "executable",
+    "mainSourceFile": "src/app.d",
+    "sourcePaths": ["src"],
+    "importPaths": ["src"],
+    "buildTypes": {
+        "debug": {
+            "buildOptions": ["debugMode", "debugInfo"]
+        },
+        "release": {
+            "buildOptions": ["releaseMode", "optimize", "inline"]
+        }
+    }
+}

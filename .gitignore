@@ -1,0 +1,19 @@
+# D build artifacts
+.dub/
+*.o
+*.obj
+*.exe
+peridynamics
+peridynamics.so
+peridynamics.dylib
+peridynamics.dll
+
+# Editor specific files
+.idea/
+.vscode/
+*.swp
+*~
+memory-bank/
+
+# Generated documentation
+docs/
