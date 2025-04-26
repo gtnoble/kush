@@ -11,8 +11,8 @@ void simulate(T, V)(MaterialBody!(T, V) body, double timeStep, size_t numSteps)
     for (size_t step = 0; step < numSteps; ++step) {
         // Update each point directly
         for (size_t i = 0; i < body.numPoints; ++i) {
-            T point = body[i];
-            T[] neighbors = body.neighbors(i);
+            auto point = body[i];  // Uses non-const opIndex
+            const(T)[] neighbors = body.neighbors(i);
             point.updateState(neighbors, timeStep);
         }
     }
@@ -37,7 +37,7 @@ unittest {
         @property V position() const { return _pos; }
         @property V referencePosition() const { return _refPos; }
         
-        void updateState(TestPoint!V[] neighbors, double timeStep) {
+        void updateState(const(TestPoint!V)[] neighbors, double timeStep) {
             _pos = _pos + _vel * timeStep;  // Update position using current velocity
         }
     }

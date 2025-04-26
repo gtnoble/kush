@@ -15,8 +15,8 @@ class MaterialBody(T, V) if (isMaterialPoint!(T, V)) {
     }
     
     // Get neighbors within horizon based on current positions
-    T[] neighbors(size_t index) const {
-        T[] result;
+    const(T)[] neighbors(size_t index) const {
+        const(T)[] result;
         V pos = points[index].position;
         
         for (size_t i = 0; i < points.length; i++) {
@@ -39,7 +39,11 @@ class MaterialBody(T, V) if (isMaterialPoint!(T, V)) {
     }
     
     // Indexing operators
-    T opIndex(size_t index) const {
+    const(T) opIndex(size_t index) const {
+        return points[index];
+    }
+    
+    T opIndex(size_t index) {
         return points[index];
     }
     

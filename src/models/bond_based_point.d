@@ -46,7 +46,7 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
     }
     
     // Calculate bond force between two points with reversible damage
-    private V bondForce(BondBasedPoint!V neighbor) const {
+    private V bondForce(const(BondBasedPoint!V) neighbor) const {
         // Calculate reference and current vectors between points
         V refVector = neighbor.referencePosition - _referencePosition;
         V curVector = neighbor.position - _position;
@@ -67,7 +67,7 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
     }
     
     // Direct state update implementation
-    void updateState(BondBasedPoint!V[] neighbors, double timeStep) {
+    void updateState(const(BondBasedPoint!V)[] neighbors, double timeStep) {
         // Calculate total force
         V totalForce = V.zero();
         foreach (neighbor; neighbors) {

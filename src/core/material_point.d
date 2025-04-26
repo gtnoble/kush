@@ -9,7 +9,7 @@ interface MaterialPoint(T, V) if (is(V == Vector!N, size_t N)) {
     @property V referencePosition() const;
     
     // Direct state update method
-    void updateState(T[] neighbors, double timeStep);
+    void updateState(const(T)[] neighbors, double timeStep);
 }
 
 // Helper template to constrain vector dimensions
