@@ -7,6 +7,7 @@ interface MaterialPoint(T, V) if (is(V == Vector!N, size_t N)) {
     // Position properties
     @property V position() const;
     @property V referencePosition() const;
+    @property V velocity() const;  // Add velocity property
     
     // Direct state update method
     void updateState(const(T)[] neighbors, double timeStep);

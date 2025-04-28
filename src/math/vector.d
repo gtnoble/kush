@@ -18,6 +18,7 @@ struct Vector(size_t N) if (N >= 1 && N <= 3) {
     // Default constructor initializes to zero
     static Vector!N zero() {
         Vector!N result;
+        result.components[] = 0.0;
         return result;
     }
     
@@ -67,6 +68,16 @@ struct Vector(size_t N) if (N >= 1 && N <= 3) {
     Vector!N opBinaryRight(string op)(double scalar) const
         if (op == "*") {
         return this * scalar;  // Reuse right multiplication
+    }
+    
+    // Scalar division
+    Vector!N opBinary(string op)(double scalar) const
+        if (op == "/") {
+        Vector!N result;
+        for (size_t i = 0; i < N; i++) {
+            result.components[i] = components[i] / scalar;
+        }
+        return result;
     }
     
     // Dot product
@@ -129,4 +140,10 @@ unittest {
     auto v4 = Vector2D(1.0, 2.0);
     auto v5 = Vector2D(3.0, 4.0);
     assert(v4.dot(v5) == 11.0);
+    
+    // Test scalar division
+    auto v6 = Vector2D(4.0, 6.0);
+    auto divided = v6 / 2.0;
+    assert(divided[0] == 2.0);
+    assert(divided[1] == 3.0);
 }
