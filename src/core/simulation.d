@@ -4,7 +4,8 @@ import core.material_point;
 import core.material_body;
 import math.vector;
 import std.algorithm : min, max;
-import std.math : sqrt, abs;
+import std.math : sqrt, abs, exp, log, tanh, isNaN;
+import std.exception : enforce;
 
 // Interface for time step calculation strategies
 interface TimeStepStrategy(T, V) {
@@ -13,57 +14,102 @@ interface TimeStepStrategy(T, V) {
 
 // Adaptive time step implementation
 class AdaptiveTimeStep(T, V) : TimeStepStrategy!(T, V) {
-    private double maxTimeStep;
-    private double safetyFactor;
-    private double horizon;
-    private double maxAllowedRelativeMotion;
-    private double initialTimeStep;
-    private bool firstStep = true;
+    private double maxTimeStep;          // [time]
+    private double absoluteMaxTimeStep;  // [time]
+    private double horizon;              // [length]
+    private double safetyFactor;         // [] (dimensionless)
+    private double maxRelativeMotion;    // [] (dimensionless ratio)
+    private double characteristicVelocity; // [length/time]
+    private double responseTimeScaling;    // [] (dimensionless ratio for response time)
+    private double timeStepHistory;       // [time] Current time step
+    private bool firstStep = true;        // Flag for first step
     
-    this(double maxDt, double horizon, double safety = 0.1, double maxRelMotion = 0.1, double initialDt = -1.0) {
-        maxTimeStep = maxDt;
-        safetyFactor = safety;
+    this(
+        double initialTimeStep,           // [time]
+        double absoluteMaxTimeStep,       // [time]
+        double horizon,                   // [length]
+        double characteristicVelocity,    // [length/time]
+        double responseTimeScaling,       // [] (ratio of response time to time step)
+        double safetyFactor = 0.1,       // []
+        double maxRelativeMotion = 0.01   // []
+    ) {
+        maxTimeStep = initialTimeStep;
+        this.absoluteMaxTimeStep = absoluteMaxTimeStep;
+        assert(maxTimeStep > 0.0, "Initial time step must be greater than zero");
+        assert(absoluteMaxTimeStep > 0.0, "Absolute maximum time step must be greater than zero");
         this.horizon = horizon;
-        maxAllowedRelativeMotion = maxRelMotion;
-        initialTimeStep = initialDt;
+        this.characteristicVelocity = characteristicVelocity;
+        this.responseTimeScaling = responseTimeScaling;
+        assert(responseTimeScaling > 1.0, 
+            "Response scaling must be greater than 1.0 to ensure response time exceeds time step");
+        this.safetyFactor = safetyFactor;
+        this.maxRelativeMotion = maxRelativeMotion;
+        timeStepHistory = initialTimeStep;
     }
     
+    // Smooth approximation functions
+    private double smoothMax(double a, double b, double responseTime) {
+        double scaled_a = a / responseTime;
+        double scaled_b = b / responseTime;
+        double max_val = max(scaled_a, scaled_b);
+        double softMax = responseTime * (max_val + log(exp(scaled_a - max_val) + exp(scaled_b - max_val)));
+        if (softMax > max(a, b) || isNaN(softMax)) {
+            return max(a, b);
+        }
+        return softMax;
+    }
+
+    private double smoothMin(double a, double b, double responseTime) {
+        return -smoothMax(-a, -b, responseTime);
+    }
+    
+    private double lerp(double a, double b, double t) {
+        return a * (1 - t) + b * t;
+    }
+
     double calculateTimeStep(const MaterialBody!(T, V) body) {
+        if (firstStep) {
+            firstStep = false;
+            return timeStepHistory;  // Return initial time step
+        }
+        
         if (body.numPoints == 0) return maxTimeStep;
         
-        // Use initial time step for first iteration if specified
-        if (firstStep && initialTimeStep >= 0.0) {
-            firstStep = false;
-            return min(initialTimeStep, maxTimeStep);
-        }
-        firstStep = false;
+        // Calculate response time based on current time step
+        double responseTime = responseTimeScaling * timeStepHistory;
         
-        // Find maximum velocity magnitude
+        // Find maximum velocity magnitude and minimum spacing
         double maxVelocity = 0.0;
         double minSpacing = double.max;
         
-        // Calculate maximum velocity and minimum spacing
         for (size_t i = 0; i < body.numPoints; ++i) {
             auto point = body[i];
-            double velMag = point.velocity.magnitude;
-            maxVelocity = max(maxVelocity, velMag);
+            maxVelocity = smoothMax(maxVelocity, point.velocity.magnitude, responseTime);
             
-            // Find minimum spacing between this point and its neighbors
             const(T)[] neighbors = body.neighbors(i);
             foreach (neighbor; neighbors) {
                 double spacing = (point.position - neighbor.position).magnitude;
-                minSpacing = min(minSpacing, spacing);
+                minSpacing = smoothMin(minSpacing, spacing, responseTime);
             }
         }
         
-        if (maxVelocity < 1e-10) return maxTimeStep;  // If essentially static
-        
-        // Calculate time steps based on both criteria
+        // Calculate time step constraints using smooth operations
         double dtCFL = safetyFactor * (minSpacing / maxVelocity);
-        double dtDisp = safetyFactor * (horizon * maxAllowedRelativeMotion / maxVelocity);
+        double dtDisp = safetyFactor * (horizon * maxRelativeMotion / maxVelocity);
         
-        // Return minimum of all constraints
-        return min(min(dtCFL, dtDisp), maxTimeStep);
+        // Apply constraints with smooth transitions
+        double baseStep = smoothMin(dtCFL, dtDisp, responseTime);
+        double targetStep = smoothMin(baseStep, absoluteMaxTimeStep, responseTime);
+        
+        // Calculate stability metric
+        double stabilityMetric = 1.0 / (1.0 + (maxVelocity/characteristicVelocity)^^2);
+        
+        // Update time step with smooth transition
+        double newStep = lerp(targetStep, absoluteMaxTimeStep, stabilityMetric);
+        timeStepHistory = timeStepHistory + (newStep - timeStepHistory) / responseTimeScaling;
+        
+        enforce(timeStepHistory > 0.0, "Time step must be greater than zero");
+        return timeStepHistory;
     }
 }
 
@@ -84,7 +130,7 @@ void simulate(T, V)(
         double timeStep = timeStepStrategy.calculateTimeStep(body);
         
         // Log time step changes if they differ significantly
-        if (abs(timeStep - lastTimeStep) > 1e-10) {
+        if (abs(timeStep - lastTimeStep) / lastTimeStep > 0.0) {
             writefln("Time %.4e: Adjusted step size to %.4e", currentTime, timeStep);
         }
         lastTimeStep = timeStep;
@@ -96,8 +142,8 @@ void simulate(T, V)(
         
         // Export state at every step
         import std.format : format;
-        string filename = format("simulation_step_%04d.csv", step);
-        body.exportToCSV(filename);
+        //string filename = format("simulation_step_%04d.csv", step);
+        //body.exportToCSV(filename);
 
         // Update each point
         for (size_t i = 0; i < body.numPoints; ++i) {
@@ -141,8 +187,14 @@ unittest {
     auto p1 = new TestPoint!Vector1D(Vector1D(0.0), Vector1D(1.0));  // Initial position 0, velocity 1
     auto body = new MaterialBody!(TestPoint!Vector1D, Vector1D)([p1], 1.0);
     
-    // Create adaptive time step strategy
-    auto timeStepStrategy = new AdaptiveTimeStep!(TestPoint!Vector1D, Vector1D)(0.2, 1.0, 0.1);
+    // Create adaptive time step strategy with physical parameters
+    auto timeStepStrategy = new AdaptiveTimeStep!(TestPoint!Vector1D, Vector1D)(
+        0.2,   // initialTimeStep
+        1.0,   // absoluteMaxTimeStep
+        1.0,   // horizon
+        0.5,   // characteristicVelocity
+        2.0    // responseScaling (ratio of response time to time step)
+    );
     
     // Simulate for 1.0 total time with adaptive stepping
     simulate(body, timeStepStrategy, 1.0);
@@ -179,8 +231,14 @@ unittest {
     auto oscillator = new OscillatingPoint!Vector1D(Vector1D(0.0), 2.0 * PI);
     auto body = new MaterialBody!(TestPoint!Vector1D, Vector1D)([oscillator], 1.0);
     
-    // Create adaptive stepper with smaller max time step
-    auto timeStepStrategy = new AdaptiveTimeStep!(TestPoint!Vector1D, Vector1D)(0.05, 1.0, 0.1);
+    // Create adaptive stepper with physical parameters
+    auto timeStepStrategy = new AdaptiveTimeStep!(TestPoint!Vector1D, Vector1D)(
+        0.05,  // initialTimeStep
+        1.0,   // absoluteMaxTimeStep
+        1.0,   // horizon
+        0.5,   // characteristicVelocity
+        2.0    // responseScaling (ratio of response time to time step)
+    );
     
     // Simulate for one period
     simulate(body, timeStepStrategy, 1.0);
@@ -197,15 +255,27 @@ unittest {
     auto p1 = new TestPoint!Vector1D(Vector1D(0.0), Vector1D(1.0));
     auto body = new MaterialBody!(TestPoint!Vector1D, Vector1D)([p1], 1.0);
     
-    // Create adaptive stepper with initial time step
-    double initialDt = 0.1;
-    auto timeStepStrategy = new AdaptiveTimeStep!(TestPoint!Vector1D, Vector1D)(0.2, 1.0, 0.1, 0.1, initialDt);
+    // Create adaptive stepper with physical parameters
+    auto timeStepStrategy = new AdaptiveTimeStep!(TestPoint!Vector1D, Vector1D)(
+        0.1,   // initialTimeStep
+        0.2,   // absoluteMaxTimeStep
+        1.0,   // horizon
+        0.5,   // characteristicVelocity
+        2.0    // responseScaling (ratio of response time to time step)
+    );
     
-    // First step should use initial time step
+    // First step should be close to initial time step
     double firstStep = timeStepStrategy.calculateTimeStep(body);
-    assert(abs(firstStep - initialDt) < 1e-10, "First time step should match initial time step");
+    assert(abs(firstStep - 0.1) < 1e-10, "First step should match initial time step");
     
-    // Second step should use adaptive calculation
-    double secondStep = timeStepStrategy.calculateTimeStep(body);
-    assert(abs(secondStep - initialDt) > 1e-10, "Second time step should differ from initial time step");
+    // Run several steps to let the system adapt
+    double lastStep = firstStep;
+    for (int i = 0; i < 10; i++) {
+        double nextStep = timeStepStrategy.calculateTimeStep(body);
+        assert(nextStep <= 0.2, "Steps should not exceed absolute maximum");
+        lastStep = nextStep;
+    }
+    
+    // Final step should have adapted
+    assert(abs(lastStep - firstStep) > 1e-10, "Time step should adapt from initial value");
 }

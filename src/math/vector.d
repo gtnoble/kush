@@ -80,6 +80,16 @@ struct Vector(size_t N) if (N >= 1 && N <= 3) {
         return result;
     }
     
+    // Unary negation
+    Vector!N opUnary(string op)() const
+        if (op == "-") {
+        Vector!N result;
+        for (size_t i = 0; i < N; i++) {
+            result.components[i] = -components[i];
+        }
+        return result;
+    }
+    
     // Dot product
     double dot(Vector!N other) const {
         double sum = 0;
@@ -146,4 +156,10 @@ unittest {
     auto divided = v6 / 2.0;
     assert(divided[0] == 2.0);
     assert(divided[1] == 3.0);
+    
+    // Test negation
+    auto v7 = Vector2D(1.0, -2.0);
+    auto negated = -v7;
+    assert(negated[0] == -1.0);
+    assert(negated[1] == 2.0);
 }

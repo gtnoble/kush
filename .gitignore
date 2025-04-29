@@ -13,7 +13,9 @@ peridynamics.dll
 .vscode/
 *.swp
 *~
+
 memory-bank/
+*.csv
 
 # Generated documentation
 docs/
