@@ -62,10 +62,12 @@ class StandardDamper(V) : Damper!V if (isVector!V) {
     
     // Implement global damping (mass and stiffness)
     V calculateGlobalForce(V velocity, double mass) const {
+        // Early return if mass damping is disabled (infinite time constant)
+        if (_massTimeConstant == double.infinity) {
+            return V.zero();
+        }
         // Mass damping: F = -mv/τₘ
-        V massDamping = velocity * (-mass / _massTimeConstant);
-        
-        return massDamping;
+        return velocity * (-mass / _massTimeConstant);
     }
     
     // Implement artificial viscosity
@@ -74,6 +76,11 @@ class StandardDamper(V) : Damper!V if (isVector!V) {
         V bondVector,
         double mass
     ) const {
+        // Early return if viscosity is disabled (infinite time constant)
+        if (_viscosityTimeConstant == double.infinity) {
+            return V.zero();
+        }
+        
         double isCompressing = relativeVelocity.dot(bondVector) < 0;
         if (isCompressing) return V.zero();
         
@@ -84,6 +91,9 @@ class StandardDamper(V) : Damper!V if (isVector!V) {
 
     // Calculate global damping dissipation using force dot velocity
     double calculateGlobalDissipation(V velocity, double mass, double timeStep) const {
+        if (_massTimeConstant == double.infinity) {
+            return 0.0;
+        }
         return -0.5 * calculateGlobalForce(velocity, mass).dot(velocity) * timeStep;
     }
     
@@ -94,6 +104,9 @@ class StandardDamper(V) : Damper!V if (isVector!V) {
         double mass,
         double timeStep
     ) const {
+        if (_viscosityTimeConstant == double.infinity) {
+            return 0.0;
+        }
         return -0.5 * calculateBondForce(relativeVelocity, bondVector, mass).dot(relativeVelocity) * timeStep;
     }
 }
