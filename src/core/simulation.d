@@ -2,6 +2,7 @@ module core.simulation;
 
 import core.material_point;
 import core.material_body;
+import core.integration;
 import math.vector;
 import std.algorithm : min, max;
 import std.math : sqrt, abs, exp, log, tanh, isNaN;
@@ -9,7 +10,7 @@ import std.exception : enforce;
 
 // Interface for time step calculation strategies
 interface TimeStepStrategy(T, V) {
-    double calculateTimeStep(const MaterialBody!(T, V) body);
+    double calculateTimeStep(MaterialBody!(T, V) body);
 }
 
 // Adaptive time step implementation
@@ -67,7 +68,7 @@ class AdaptiveTimeStep(T, V) : TimeStepStrategy!(T, V) {
         return a * (1 - t) + b * t;
     }
 
-    double calculateTimeStep(const MaterialBody!(T, V) body) {
+    double calculateTimeStep(MaterialBody!(T, V) body) {
         if (firstStep) {
             firstStep = false;
             return timeStepHistory;  // Return initial time step
@@ -82,11 +83,12 @@ class AdaptiveTimeStep(T, V) : TimeStepStrategy!(T, V) {
         double maxVelocity = 0.0;
         double minSpacing = double.max;
         
+        T[] neighbors;
         for (size_t i = 0; i < body.numPoints; ++i) {
             auto point = body[i];
             maxVelocity = smoothMax(maxVelocity, point.velocity.magnitude, responseTime);
             
-            const(T)[] neighbors = body.neighbors(i);
+            body.neighbors(i, neighbors);
             foreach (neighbor; neighbors) {
                 double spacing = (point.position - neighbor.position).magnitude;
                 minSpacing = smoothMin(minSpacing, spacing, responseTime);
@@ -117,6 +119,7 @@ class AdaptiveTimeStep(T, V) : TimeStepStrategy!(T, V) {
 void simulate(T, V)(
     MaterialBody!(T, V) body,
     TimeStepStrategy!(T, V) timeStepStrategy,
+    IntegrationStrategy!(T, V) integrator,
     double totalTime
 ) if (isMaterialPoint!(T, V)) {
     import std.stdio : writefln;
@@ -142,15 +145,11 @@ void simulate(T, V)(
         
         // Export state at every step
         import std.format : format;
-        //string filename = format("simulation_step_%04d.csv", step);
-        //body.exportToCSV(filename);
+        string filename = format("simulation_step_%04d.csv", step);
+        body.exportToCSV(filename);
 
-        // Update each point
-        for (size_t i = 0; i < body.numPoints; ++i) {
-            auto point = body[i];  // Uses non-const opIndex
-            const(T)[] neighbors = body.neighbors(i);
-            point.updateState(neighbors, timeStep);
-        }
+        // Update system state using integrator
+        integrator.integrate(body, timeStep);
         
         currentTime += timeStep;
         ++step;

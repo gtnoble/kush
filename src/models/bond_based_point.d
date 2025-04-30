@@ -20,6 +20,17 @@ interface Damper(V) if (isVector!V) {
         V bondVector,
         double mass
     ) const;
+
+    // Calculate global damping dissipation
+    double calculateGlobalDissipation(V velocity, double mass, double timeStep) const;
+    
+    // Calculate per-bond damping dissipation
+    double calculateBondDissipation(
+        V relativeVelocity,  // Relative velocity between points
+        V bondVector,        // Vector from point to neighbor
+        double mass,
+        double timeStep      // Time step for converting power to energy
+    ) const;
 }
 
 alias InfluenceFunction = double function(double bondLength, double neighborhoodRadius);
@@ -71,6 +82,21 @@ class StandardDamper(V) : Damper!V if (isVector!V) {
         
         return -relativeVelocity * mass / _viscosityTimeConstant * _influenceFunction(bondLength, _neighborhoodRadius);
     }
+
+    // Calculate global damping dissipation using force dot velocity
+    double calculateGlobalDissipation(V velocity, double mass, double timeStep) const {
+        return -0.5 * calculateGlobalForce(velocity, mass).dot(velocity) * timeStep;
+    }
+    
+    // Calculate per-bond damping dissipation using force dot velocity
+    double calculateBondDissipation(
+        V relativeVelocity,
+        V bondVector,
+        double mass,
+        double timeStep
+    ) const {
+        return -0.5 * calculateBondForce(relativeVelocity, bondVector, mass).dot(relativeVelocity) * timeStep;
+    }
 }
 
 // Bond-based material point implementation
@@ -79,24 +105,23 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
     private V _position;
     private V _referencePosition;
     private V _velocity;
+    private double _mass;
     private bool _isVelocityFixed;  // Whether velocity updates are disabled
     private V _constantForce;  // Store constant external force
     private double _timeElapsed;      // Track simulation time
     private V _targetForce;          // Final force magnitude
     private double _rampDuration;     // Time to reach target force
 
-    // Velocity accessor
-    @property V velocity() const {
-        return _velocity;
-    }
-
-    // Velocity setter
+    // Interface implementation
+    @property V position() const { return _position; }
+    @property V referencePosition() const { return _referencePosition; }
+    @property V velocity() const { return _velocity; }
     @property void velocity(V vel) {
         if (!_isVelocityFixed) {
             _velocity = vel;
         }
     }
-    private double _mass;
+    @property void position(V newPos) { _position = newPos; }
     
     // Material properties
     private double _bondStiffness;  // Bond stiffness constant
@@ -150,13 +175,58 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
         return _constantForce;
     }
     
-    // Position properties
-    @property V position() const {
-        return _position;
-    }
-    
-    @property V referencePosition() const {
-        return _referencePosition;
+    // Lagrangian calculation
+    double computeLagrangian(const(BondBasedPoint!V)[] neighbors, V proposedPosition, double timeStep) const {
+        // Kinetic energy T = (1/2)m((x2-x1)/dt)^2
+        V proposedVelocity = (proposedPosition - _position) / timeStep;
+        double kineticEnergy = 0.5 * _mass * proposedVelocity.dot(proposedVelocity);
+        
+        // Potential energy from bonds
+        double potentialEnergy = 0.0;
+        foreach (neighbor; neighbors) {
+            // Calculate reference and proposed vectors
+            V refVector = neighbor.referencePosition - _referencePosition;
+            V propVector = neighbor._position - proposedPosition;
+            
+            double refLength = refVector.magnitude();
+            double propLength = propVector.magnitude();
+            
+            // Calculate stretch
+            double stretch = (propLength - refLength) / refLength;
+            
+            // Bond energy if not broken
+            if (abs(stretch) <= _criticalStretch) {
+                potentialEnergy += 0.5 * _bondStiffness * stretch * stretch;
+            }
+            else {
+                potentialEnergy += 0.5 * _bondStiffness * _criticalStretch * _criticalStretch; // Energy at critical stretch
+            }
+        }
+        
+        // Calculate dissipation from damping
+        double totalDissipation = 0.0;
+        // Global damping dissipation
+        totalDissipation += _damper.calculateGlobalDissipation(proposedVelocity, _mass, timeStep);
+        
+        // Bond damping dissipation
+        foreach (neighbor; neighbors) {
+            V proposedRelativeVelocity = (neighbor._velocity - proposedVelocity);
+            V propVector = neighbor._position - proposedPosition;
+            
+            totalDissipation += _damper.calculateBondDissipation(
+                proposedRelativeVelocity,
+                propVector,
+                _mass,
+                timeStep
+            );
+        }
+        
+        // Add potential energy contribution from constant external forces
+        // Note: Negative because forces point in direction of decreasing potential
+        potentialEnergy -= _constantForce.dot(proposedPosition - _referencePosition);
+        
+        // Lagrangian = T - V - D
+        return kineticEnergy - potentialEnergy - totalDissipation;
     }
     
     // Check if a bond is under compression

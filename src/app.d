@@ -6,6 +6,7 @@ import std.random : Random, uniform;
 import core.material_point;
 import core.material_body;
 import core.simulation;
+import core.integration;
 import models.bond_based_point;
 import math.vector;
 
@@ -32,7 +33,7 @@ void main() {
     double bondStiffness = 6.0 * youngsModulus / (PI * horizon * horizon * horizon);
     
     // Damping parameters
-    double massTimeConstant = 1e-10;    // Mass damping time constant (seconds)
+    double massTimeConstant = double.infinity;    // Mass damping time constant (seconds)
     double viscosityTimeConstant = double.infinity;   // Viscosity damping time constant (seconds)
 
     // Create single damper instance for all points
@@ -46,9 +47,10 @@ void main() {
     // Simulation parameters
     // Maximum time step based on stability criterion: dt < 2/sqrt(k/m)
     // where k ≈ 2e7 N/m³ and m ≈ 2.7e-9 kg
-    double initialTimeStep = 1e-20;  // Maximum allowed time step
-    double maxTimeStep = 1e-9;    // Maximum time step for simulation
-    double totalTime = maxTimeStep * 1000;  // Total simulation time
+    double initialTimeStep = 1e-6;  // Maximum allowed time step
+    double maxTimeStep = 1e-3;    // Maximum time step for simulation
+    //double totalTime = maxTimeStep * 100;   // Total simulation time (reduced from 1000 steps)
+    double totalTime = 3e-6;   // Total simulation time (reduced from 1000 steps)
     double safetyFactor = 0.1;  // Conservative safety factor for stability
 
     // Calculate characteristic velocity as sqrt(E/ρ)
@@ -60,7 +62,7 @@ void main() {
         maxTimeStep,           // absoluteMaxTimeStep [time]
         horizon,              // horizon [length]
         characteristicVelocity * 0.01, // characteristicVelocity [length/time] (1% of material wave speed)
-        100000,               // responseScaling (response time is 5x the current time step)
+        100,               // responseScaling (response time is 5x the current time step)
         safetyFactor,        // safetyFactor []
         0.1                  // maxRelativeMotion [] (10% of horizon)
     );
@@ -71,6 +73,13 @@ void main() {
         Random,
         Jitter
     }
+    
+    // Define total macroscopic force (100N upward)
+    Vector2D totalForce = Vector2D(0.0, 100.0);
+    
+    // Count to track points that will receive force
+    int forcedPointCount = 0;
+    Vector2D perPointForce;  // Will be initialized after counting points
 
     // Create points using jitter sampling
     BondBasedPoint!Vector2D[] points;
@@ -83,7 +92,7 @@ void main() {
     // Function to create a point at given position
     BondBasedPoint!Vector2D createPoint(Vector2D pos, bool isNearUpperCrack, bool isNearRightEdge) {
         if (isNearUpperCrack) {
-            // Points near upper crack edge: apply ramped upward force
+            // Points near upper crack edge: apply distributed force
             return new BondBasedPoint!Vector2D(
                 pos,                     // reference position
                 mass,                    // point mass
@@ -92,7 +101,7 @@ void main() {
                 damper,                 // damping strategy
                 Vector2D(0.0, 0.0),     // zero initial velocity
                 false,                  // not fixed
-                Vector2D(0.0, 100e-3),  // target force
+                perPointForce,          // distributed portion of total force
                 100e-9                  // ramp duration (100ns)
             );
         }
@@ -126,6 +135,26 @@ void main() {
         }
     }
 
+    // First pass: count points that will receive force (jitter sampling only)
+    if (samplingMethod == SamplingMethod.Jitter) {
+        for (int i = 0; i < nx; i++) {
+            for (int j = 0; j < ny; j++) {
+                if (abs(j - ny/2) <= 2 && i < nx/2) continue;
+                
+                double distanceFromUpperCrack = abs(j - (ny/2 + 3));
+                if (distanceFromUpperCrack * dx <= horizon && i < nx/2) {
+                    forcedPointCount++;
+                }
+            }
+        }
+    }
+
+    // Initialize per-point force by dividing total force by number of forced points
+    perPointForce = totalForce / cast(double)forcedPointCount;
+    writeln("Number of forced points: ", forcedPointCount);
+    writeln("Per-point force: ", perPointForce);
+
+    // Create points
     if (samplingMethod == SamplingMethod.Jitter) {
         // Create points using jitter sampling
         for (int i = 0; i < nx; i++) {
@@ -184,8 +213,17 @@ void main() {
     writeln("Starting simulation...");
     writeln("Number of points: ", body.numPoints);
 
-    // Run simulation with adaptive time stepping
-    simulate(body, timeStepStrategy, totalTime);
+    // Create implicit integrator with Gradient Descent solver
+    auto solver = new GradientDescentSolver!(BondBasedPoint!Vector2D, Vector2D)(
+        1e-6,   // tolerance
+        1,    // maxIterations
+        1/bondStiffness / 1000,   // learningRate
+        0.9     // momentum
+    );
+    auto integrator = new LagrangianIntegrator!(BondBasedPoint!Vector2D, Vector2D)(solver);
+    
+    // Run simulation with adaptive time stepping and implicit integrator
+    simulate(body, timeStepStrategy, integrator, totalTime);
 
     writeln("Simulation complete.");
 

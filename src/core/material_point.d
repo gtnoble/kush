@@ -7,10 +7,15 @@ interface MaterialPoint(T, V) if (is(V == Vector!N, size_t N)) {
     // Position properties
     @property V position() const;
     @property V referencePosition() const;
-    @property V velocity() const;  // Add velocity property
+    @property V velocity() const;
+    @property void velocity(V vel);
+
+    // Lagrangian calculation
+    double computeLagrangian(const(T)[] neighbors, V proposedPosition, double timeStep) const;
     
-    // Direct state update method
+    // State update methods
     void updateState(const(T)[] neighbors, double timeStep);
+    void position(V newPosition);
 }
 
 // Helper template to constrain vector dimensions
