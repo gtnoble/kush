@@ -14,5 +14,10 @@
         "release": {
             "buildOptions": ["releaseMode", "optimize", "inline"]
         }
-    }
+    },
+    "dflags-gdc": [
+        "-march=native",
+        "-mavx",
+        "-msse2"
+    ]
 }

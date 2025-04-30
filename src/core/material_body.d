@@ -141,7 +141,7 @@ class MaterialBody(T, V) if (isMaterialPoint!(T, V)) {
                 foreach (neighborIndex; getPointsInCell(x + dx)) {
                     if (neighborIndex == index) continue;
                     
-                    if ((points[neighborIndex].position - pos).magnitude() <= horizon) {
+                    if ((points[neighborIndex].position - pos).magnitudeSquared() <= horizon ^^ 2) {
                         resultAppender.put(points[neighborIndex]);
                     }
                 }
@@ -161,7 +161,7 @@ class MaterialBody(T, V) if (isMaterialPoint!(T, V)) {
                 foreach (neighborIndex; neighborIndices) {
                     if (neighborIndex == index) continue;
                     
-                    if ((points[neighborIndex].position - pos).magnitude() <= horizon) {
+                    if ((points[neighborIndex].position - pos).magnitudeSquared() <= horizon ^^ 2) {
                         resultAppender.put(points[neighborIndex]);
                     }
                 }
@@ -182,7 +182,7 @@ class MaterialBody(T, V) if (isMaterialPoint!(T, V)) {
                 foreach (neighborIndex; getPointsInCell(x + dx, y + dy, z + dz)) {
                     if (neighborIndex == index) continue;
                     
-                    if ((points[neighborIndex].position - pos).magnitude() <= horizon) {
+                    if ((points[neighborIndex].position - pos).magnitudeSquared() <= horizon ^^ 2) {
                         resultAppender.put(points[neighborIndex]);
                     }
                 }

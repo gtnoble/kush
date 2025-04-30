@@ -74,9 +74,8 @@ class StandardDamper(V) : Damper!V if (isVector!V) {
         V bondVector,
         double mass
     ) const {
-        V bondDirection = bondVector.unit();
-        double compressionRate = -(relativeVelocity.dot(bondDirection));
-        if (compressionRate <= 0) return V.zero();
+        double isCompressing = relativeVelocity.dot(bondVector) < 0;
+        if (isCompressing) return V.zero();
         
         double bondLength = bondVector.magnitude();
         
@@ -179,7 +178,7 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
     double computeLagrangian(const(BondBasedPoint!V)[] neighbors, V proposedPosition, double timeStep) const {
         // Kinetic energy T = (1/2)m((x2-x1)/dt)^2
         V proposedVelocity = (proposedPosition - _position) / timeStep;
-        double kineticEnergy = 0.5 * _mass * proposedVelocity.dot(proposedVelocity);
+        double kineticEnergy = 0.5 * _mass * proposedVelocity.magnitudeSquared();
         
         // Potential energy from bonds
         double potentialEnergy = 0.0;
@@ -233,7 +232,7 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
     private bool isCompressing(const(BondBasedPoint!V) neighbor) const {
         V relativeVelocity = neighbor.velocity - _velocity;
         V bondVector = neighbor.position - _position;
-        return relativeVelocity.dot(bondVector.unit()) < 0;
+        return relativeVelocity.dot(bondVector) < 0;
     }
 
     // Calculate bond force between two points with reversible damage
@@ -313,6 +312,6 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
         
         // 5. Complete velocity update with new forces
         _velocity = halfStepVelocity + newForce * (timeStep * 0.5 / _mass);
-        enforce(velocity.magnitude() < SPEED_OF_LIGHT, "Velocity exceeds speed of light");
+        enforce(velocity.magnitudeSquared() < SPEED_OF_LIGHT ^^ 2, "Velocity exceeds speed of light");
     }
 }

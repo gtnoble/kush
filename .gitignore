@@ -3,6 +3,7 @@
 *.o
 *.obj
 *.exe
+*.out
 peridynamics
 peridynamics.so
 peridynamics.dylib
@@ -16,6 +17,9 @@ peridynamics.dll
 
 memory-bank/
 *.csv
+*.def
+*.log
+*.old
 
 # Generated documentation
 docs/

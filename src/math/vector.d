@@ -1,16 +1,65 @@
 module math.vector;
 
 import std.math;
+import core.simd;
+import core.cpuid;
+
+// CPU feature detection
+static bool hasSSE2;
+static bool hasAVX;
+
+static this() {
+    hasSSE2 = core.cpuid.sse2;
+    hasAVX = core.cpuid.avx;
+    import std.stdio;
+    writefln("SIMD Support Detected:\n  Runtime - SSE2: %s, AVX: %s\n  Compile-time - SSE2: %s, AVX: %s", 
+        hasSSE2, hasAVX,
+        is(double2) ? "yes" : "no",
+        is(double4) ? "yes" : "no");
+}
 
 // Generic Vector template for any dimension
 struct Vector(size_t N) if (N >= 1 && N <= 3) {
-    // Components stored in an array
-    double[N] components;
+    static if (N == 2) {
+        static if (is(double2)) {  // Check if SIMD type is available
+            union {
+                double[2] components;
+                double2 simdComponents;
+            }
+        } else {
+            double[2] components;
+        }
+    } else static if (N == 3) {
+        static if (is(double4)) {  // AVX double vector
+            union {
+                double[3] components;
+                double4 simdComponents;  // We'll only use first 3 components
+            }
+        } else {
+            double[3] components;
+        }
+    } else {
+        double[N] components;  // 1D case remains scalar
+    }
     
     // Constructor with variadic arguments
     this(double[] values...) {
         assert(values.length == N, "Wrong number of components");
-        for (size_t i = 0; i < N; i++) {
+        static if (N == 2 && is(double2)) {
+            if (hasSSE2) {
+                components[0] = values[0];
+                components[1] = values[1];
+                return;
+            }
+        } else static if (N == 3 && is(double4)) {
+            if (hasAVX) {
+                components[0] = values[0];
+                components[1] = values[1];
+                components[2] = values[2];
+                return;
+            }
+        }
+        foreach (i; 0..N) {
             components[i] = values[i];
         }
     }
@@ -18,48 +67,131 @@ struct Vector(size_t N) if (N >= 1 && N <= 3) {
     // Default constructor initializes to zero
     static Vector!N zero() {
         Vector!N result;
-        result.components[] = 0.0;
+        static if (N == 2 && is(double2)) {
+            if (hasSSE2) {
+                result.simdComponents = 0;
+                return result;
+            }
+        } else static if (N == 3 && is(double4)) {
+            if (hasAVX) {
+                result.simdComponents = 0;
+                return result;
+            }
+        }
+        result.components[] = 0;
         return result;
     }
     
     // Index operator for access
     ref double opIndex(size_t i) {
         assert(i < N, "Index out of bounds");
+        static if (N == 2 && is(double2)) {
+            if (hasSSE2) {
+                return *(&simdComponents[0] + i);
+            }
+        } else static if (N == 3 && is(double4)) {
+            if (hasAVX) {
+                return *(&simdComponents[0] + i);
+            }
+        }
         return components[i];
     }
     
     // Const index operator for access
     double opIndex(size_t i) const {
         assert(i < N, "Index out of bounds");
+        static if (N == 2 && is(double2)) {
+            if (hasSSE2) {
+                return simdComponents[i];
+            }
+        } else static if (N == 3 && is(double4)) {
+            if (hasAVX) {
+                return simdComponents[i];
+            }
+        }
         return components[i];
     }
     
-    // Vector addition
+    // Vector addition with SIMD support
     Vector!N opBinary(string op)(Vector!N other) const
         if (op == "+") {
         Vector!N result;
-        for (size_t i = 0; i < N; i++) {
-            result.components[i] = components[i] + other.components[i];
+        static if (N == 2 && is(double2)) {
+            if (hasSSE2) {
+                result.simdComponents = simdComponents + other.simdComponents;
+            } else {
+                foreach (i; 0..N) {
+                    result.components[i] = components[i] + other.components[i];
+                }
+            }
+        } else static if (N == 3 && is(double4)) {
+            if (hasAVX) {
+                result.simdComponents = simdComponents + other.simdComponents;
+            } else {
+                foreach (i; 0..N) {
+                    result.components[i] = components[i] + other.components[i];
+                }
+            }
+        } else {
+            foreach (i; 0..N) {
+                result.components[i] = components[i] + other.components[i];
+            }
         }
         return result;
     }
     
-    // Vector subtraction
+    // Vector subtraction with SIMD support
     Vector!N opBinary(string op)(Vector!N other) const
         if (op == "-") {
         Vector!N result;
-        for (size_t i = 0; i < N; i++) {
-            result.components[i] = components[i] - other.components[i];
+        static if (N == 2 && is(double2)) {
+            if (hasSSE2) {
+                result.simdComponents = simdComponents - other.simdComponents;
+            } else {
+                foreach (i; 0..N) {
+                    result.components[i] = components[i] - other.components[i];
+                }
+            }
+        } else static if (N == 3 && is(double4)) {
+            if (hasAVX) {
+                result.simdComponents = simdComponents - other.simdComponents;
+            } else {
+                foreach (i; 0..N) {
+                    result.components[i] = components[i] - other.components[i];
+                }
+            }
+        } else {
+            foreach (i; 0..N) {
+                result.components[i] = components[i] - other.components[i];
+            }
         }
         return result;
     }
     
-    // Scalar multiplication
+    // Scalar multiplication with SIMD support
     Vector!N opBinary(string op)(double scalar) const
         if (op == "*") {
         Vector!N result;
-        for (size_t i = 0; i < N; i++) {
-            result.components[i] = components[i] * scalar;
+        static if (N == 2 && is(double2)) {
+            if (hasSSE2) {
+                result.simdComponents = simdComponents * scalar;
+            } else {
+                foreach (i; 0..N) {
+                    result.components[i] = components[i] * scalar;
+                }
+            }
+        } else static if (N == 3 && is(double4)) {
+            if (hasAVX) {
+                result.simdComponents = simdComponents * scalar;
+            } else {
+                foreach (i; 0..N) {
+                    result.components[i] = components[i] * scalar;
+                }
+            }
+        } else {
+            foreach (i; 0..N) {
+                result.components[i] = components[i] * scalar;
+            }
         }
         return result;
     }
@@ -70,33 +202,98 @@ struct Vector(size_t N) if (N >= 1 && N <= 3) {
         return this * scalar;  // Reuse right multiplication
     }
     
-    // Scalar division
+    // Scalar division with SIMD support
     Vector!N opBinary(string op)(double scalar) const
         if (op == "/") {
         Vector!N result;
-        for (size_t i = 0; i < N; i++) {
-            result.components[i] = components[i] / scalar;
+        static if (N == 2 && is(double2)) {
+            if (hasSSE2) {
+                result.simdComponents = simdComponents / scalar;
+            } else {
+                foreach (i; 0..N) {
+                    result.components[i] = components[i] / scalar;
+                }
+            }
+        } else static if (N == 3 && is(double4)) {
+            if (hasAVX) {
+                result.simdComponents = simdComponents / scalar;
+            } else {
+                foreach (i; 0..N) {
+                    result.components[i] = components[i] / scalar;
+                }
+            }
+        } else {
+            foreach (i; 0..N) {
+                result.components[i] = components[i] / scalar;
+            }
         }
         return result;
     }
     
-    // Unary negation
+    // Unary negation with SIMD support
     Vector!N opUnary(string op)() const
         if (op == "-") {
         Vector!N result;
-        for (size_t i = 0; i < N; i++) {
-            result.components[i] = -components[i];
+        static if (N == 2 && is(double2)) {
+            if (hasSSE2) {
+                result.simdComponents = -simdComponents;
+            } else {
+                foreach (i; 0..N) {
+                    result.components[i] = -components[i];
+                }
+            }
+        } else static if (N == 3 && is(double4)) {
+            if (hasAVX) {
+                result.simdComponents = -simdComponents;
+            } else {
+                foreach (i; 0..N) {
+                    result.components[i] = -components[i];
+                }
+            }
+        } else {
+            foreach (i; 0..N) {
+                result.components[i] = -components[i];
+            }
         }
         return result;
     }
     
-    // Dot product
+    // Dot product with SIMD support
     double dot(Vector!N other) const {
-        double sum = 0;
-        for (size_t i = 0; i < N; i++) {
-            sum += components[i] * other.components[i];
+        static if (N == 2 && is(double2)) {
+            if (hasSSE2) {
+                auto prod = simdComponents * other.simdComponents;
+                return prod[0] + prod[1];
+            } else {
+                double sum = 0;
+                foreach (i; 0..N) {
+                    sum += components[i] * other.components[i];
+                }
+                return sum;
+            }
+        } else static if (N == 3 && is(double4)) {
+            if (hasAVX) {
+                auto prod = simdComponents * other.simdComponents;
+                return prod[0] + prod[1] + prod[2];
+            } else {
+                double sum = 0;
+                foreach (i; 0..N) {
+                    sum += components[i] * other.components[i];
+                }
+                return sum;
+            }
+        } else {
+            double sum = 0;
+            foreach (i; 0..N) {
+                sum += components[i] * other.components[i];
+            }
+            return sum;
         }
-        return sum;
+    }
+    
+    // Magnitude squared with SIMD support
+    double magnitudeSquared() const {
+        return dot(this);  // Reuse existing dot product implementation
     }
     
     // Magnitude
