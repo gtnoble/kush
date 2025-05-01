@@ -20,6 +20,9 @@ static this() {
 
 // Generic Vector template for any dimension
 struct Vector(size_t N) if (N >= 1 && N <= 3) {
+    /// Static dimension property
+    enum dimension = N;
+    
     static if (N == 2) {
         static if (is(double2)) {  // Check if SIMD type is available
             union {
@@ -46,18 +49,14 @@ struct Vector(size_t N) if (N >= 1 && N <= 3) {
     this(double[] values...) {
         assert(values.length == N, "Wrong number of components");
         static if (N == 2 && is(double2)) {
-            if (hasSSE2) {
-                components[0] = values[0];
-                components[1] = values[1];
-                return;
-            }
+            components[0] = values[0];
+            components[1] = values[1];
+            return;
         } else static if (N == 3 && is(double4)) {
-            if (hasAVX) {
-                components[0] = values[0];
-                components[1] = values[1];
-                components[2] = values[2];
-                return;
-            }
+            components[0] = values[0];
+            components[1] = values[1];
+            components[2] = values[2];
+            return;
         }
         foreach (i; 0..N) {
             components[i] = values[i];
@@ -68,17 +67,13 @@ struct Vector(size_t N) if (N >= 1 && N <= 3) {
     static Vector!N zero() {
         Vector!N result;
         static if (N == 2 && is(double2)) {
-            if (hasSSE2) {
-                result.simdComponents = 0;
-                return result;
-            }
+            result.simdComponents = 0;
         } else static if (N == 3 && is(double4)) {
-            if (hasAVX) {
-                result.simdComponents = 0;
-                return result;
-            }
+            result.simdComponents = 0;
+        } else {
+            result.components[] = 0;
         }
-        result.components[] = 0;
+
         return result;
     }
     
@@ -86,13 +81,9 @@ struct Vector(size_t N) if (N >= 1 && N <= 3) {
     ref double opIndex(size_t i) {
         assert(i < N, "Index out of bounds");
         static if (N == 2 && is(double2)) {
-            if (hasSSE2) {
-                return *(&simdComponents[0] + i);
-            }
+            return *(&simdComponents[0] + i);
         } else static if (N == 3 && is(double4)) {
-            if (hasAVX) {
-                return *(&simdComponents[0] + i);
-            }
+            return *(&simdComponents[0] + i);
         }
         return components[i];
     }
@@ -101,13 +92,9 @@ struct Vector(size_t N) if (N >= 1 && N <= 3) {
     double opIndex(size_t i) const {
         assert(i < N, "Index out of bounds");
         static if (N == 2 && is(double2)) {
-            if (hasSSE2) {
-                return simdComponents[i];
-            }
+            return simdComponents[i];
         } else static if (N == 3 && is(double4)) {
-            if (hasAVX) {
-                return simdComponents[i];
-            }
+            return simdComponents[i];
         }
         return components[i];
     }
@@ -117,21 +104,9 @@ struct Vector(size_t N) if (N >= 1 && N <= 3) {
         if (op == "+") {
         Vector!N result;
         static if (N == 2 && is(double2)) {
-            if (hasSSE2) {
-                result.simdComponents = simdComponents + other.simdComponents;
-            } else {
-                foreach (i; 0..N) {
-                    result.components[i] = components[i] + other.components[i];
-                }
-            }
+            result.simdComponents = simdComponents + other.simdComponents;
         } else static if (N == 3 && is(double4)) {
-            if (hasAVX) {
-                result.simdComponents = simdComponents + other.simdComponents;
-            } else {
-                foreach (i; 0..N) {
-                    result.components[i] = components[i] + other.components[i];
-                }
-            }
+            result.simdComponents = simdComponents + other.simdComponents;
         } else {
             foreach (i; 0..N) {
                 result.components[i] = components[i] + other.components[i];
@@ -145,21 +120,9 @@ struct Vector(size_t N) if (N >= 1 && N <= 3) {
         if (op == "-") {
         Vector!N result;
         static if (N == 2 && is(double2)) {
-            if (hasSSE2) {
-                result.simdComponents = simdComponents - other.simdComponents;
-            } else {
-                foreach (i; 0..N) {
-                    result.components[i] = components[i] - other.components[i];
-                }
-            }
+            result.simdComponents = simdComponents - other.simdComponents;
         } else static if (N == 3 && is(double4)) {
-            if (hasAVX) {
-                result.simdComponents = simdComponents - other.simdComponents;
-            } else {
-                foreach (i; 0..N) {
-                    result.components[i] = components[i] - other.components[i];
-                }
-            }
+            result.simdComponents = simdComponents - other.simdComponents;
         } else {
             foreach (i; 0..N) {
                 result.components[i] = components[i] - other.components[i];
@@ -173,21 +136,9 @@ struct Vector(size_t N) if (N >= 1 && N <= 3) {
         if (op == "*") {
         Vector!N result;
         static if (N == 2 && is(double2)) {
-            if (hasSSE2) {
-                result.simdComponents = simdComponents * scalar;
-            } else {
-                foreach (i; 0..N) {
-                    result.components[i] = components[i] * scalar;
-                }
-            }
+            result.simdComponents = simdComponents * scalar;
         } else static if (N == 3 && is(double4)) {
-            if (hasAVX) {
-                result.simdComponents = simdComponents * scalar;
-            } else {
-                foreach (i; 0..N) {
-                    result.components[i] = components[i] * scalar;
-                }
-            }
+            result.simdComponents = simdComponents * scalar;
         } else {
             foreach (i; 0..N) {
                 result.components[i] = components[i] * scalar;
@@ -207,21 +158,9 @@ struct Vector(size_t N) if (N >= 1 && N <= 3) {
         if (op == "/") {
         Vector!N result;
         static if (N == 2 && is(double2)) {
-            if (hasSSE2) {
-                result.simdComponents = simdComponents / scalar;
-            } else {
-                foreach (i; 0..N) {
-                    result.components[i] = components[i] / scalar;
-                }
-            }
+            result.simdComponents = simdComponents / scalar;
         } else static if (N == 3 && is(double4)) {
-            if (hasAVX) {
-                result.simdComponents = simdComponents / scalar;
-            } else {
-                foreach (i; 0..N) {
-                    result.components[i] = components[i] / scalar;
-                }
-            }
+            result.simdComponents = simdComponents / scalar;
         } else {
             foreach (i; 0..N) {
                 result.components[i] = components[i] / scalar;
@@ -235,21 +174,9 @@ struct Vector(size_t N) if (N >= 1 && N <= 3) {
         if (op == "-") {
         Vector!N result;
         static if (N == 2 && is(double2)) {
-            if (hasSSE2) {
-                result.simdComponents = -simdComponents;
-            } else {
-                foreach (i; 0..N) {
-                    result.components[i] = -components[i];
-                }
-            }
+            result.simdComponents = -simdComponents;
         } else static if (N == 3 && is(double4)) {
-            if (hasAVX) {
-                result.simdComponents = -simdComponents;
-            } else {
-                foreach (i; 0..N) {
-                    result.components[i] = -components[i];
-                }
-            }
+            result.simdComponents = -simdComponents;
         } else {
             foreach (i; 0..N) {
                 result.components[i] = -components[i];
@@ -261,27 +188,11 @@ struct Vector(size_t N) if (N >= 1 && N <= 3) {
     // Dot product with SIMD support
     double dot(Vector!N other) const {
         static if (N == 2 && is(double2)) {
-            if (hasSSE2) {
-                auto prod = simdComponents * other.simdComponents;
-                return prod[0] + prod[1];
-            } else {
-                double sum = 0;
-                foreach (i; 0..N) {
-                    sum += components[i] * other.components[i];
-                }
-                return sum;
-            }
+            auto prod = simdComponents * other.simdComponents;
+            return prod[0] + prod[1];
         } else static if (N == 3 && is(double4)) {
-            if (hasAVX) {
-                auto prod = simdComponents * other.simdComponents;
-                return prod[0] + prod[1] + prod[2];
-            } else {
-                double sum = 0;
-                foreach (i; 0..N) {
-                    sum += components[i] * other.components[i];
-                }
-                return sum;
-            }
+            auto prod = simdComponents * other.simdComponents;
+            return prod[0] + prod[1] + prod[2];
         } else {
             double sum = 0;
             foreach (i; 0..N) {

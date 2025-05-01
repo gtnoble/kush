@@ -1,0 +1,10 @@
+{
+  "materials": {
+    "pmma": {
+      "density": 1190.0,
+      "youngsModulus": 3.3e9,
+      "criticalStretch": 0.05,
+      "comment": "Material properties for acrylic (PMMA) at room temperature"
+    }
+  }
+}

@@ -1,56 +1,32 @@
-# Peridynamics Simulation Framework
+# Peridynamics Examples
 
-A flexible, type-safe implementation of peridynamics in the D programming language that supports multiple dimensions and different material models.
+This directory contains example configuration files for running peridynamics simulations.
 
-## Features
+## 2D Plate Example
 
-- Support for 1D, 2D, and 3D simulations
-- Configuration-based simulation setup
-- Bond-based peridynamic model
-- Adaptive time stepping
-- Gradient descent optimization
-- Line-delimited JSON for point configurations
-- CSV output for analysis
+A simple 2D plate example with four points:
+- Bottom-left point: Fixed velocity (anchored)
+- Top-right point: Applied upward force
+- Other points: Free to move
 
-## Building
+### Configuration Files
+- `2d_plate.materials.json`: Material properties (aluminum)
+- `2d_plate.simulation.json`: Simulation parameters including time stepping and output settings
+- `2d_plate.points.jsonl`: Point configurations (positions, forces, constraints)
 
+### Running the Example
 ```bash
-# Build with DUB
-dub build
-```
-
-## Running Simulations
-
-```bash
-# Basic usage
-peridynamics -d <dimension> -p <points> -m <materials> -s <simulation>
-
-# Example: 2D plate simulation
-peridynamics \
+# From project root
+./peridynamics \
   -d 2 \
   --points examples/2d_plate.points.jsonl \
   --materials examples/2d_plate.materials.json \
   --simulation examples/2d_plate.simulation.json
-
-# Show help
-peridynamics --help
 ```
 
-## Configuration Files
+The simulation will run and output results to `2d_plate_result.csv`.
 
-### Points (JSONL)
-Each line defines a point:
-```json
-{
-  "position": [x, y],           // Position coordinates
-  "material": "material_name",  // Reference to material
-  "thickness": value,          // Required for 1D/2D points
-  "velocity": [vx, vy],        // Optional: Initial velocity
-  "fixed_velocity": true,      // Optional: If true, velocity remains constant
-  "force": [fx, fy],          // Optional: Applied force
-  "ramp_duration": 1e-6       // Optional: Force ramp duration (s)
-}
-```
+## File Formats
 
 ### Materials (JSON)
 ```json
@@ -66,6 +42,20 @@ Each line defines a point:
       "ramp_duration": 1e-6        // Optional: Force ramp duration (s)
     }
   }
+}
+```
+
+### Points (JSONL)
+Each line is a JSON object:
+```json
+{
+  "position": [x, y],           // Position coordinates
+  "material": "material_name",  // Reference to material
+  "thickness": value,          // Required for 1D/2D points
+  "velocity": [vx, vy],        // Optional: Initial velocity
+  "fixed_velocity": true,      // Optional: If true, velocity remains constant
+  "force": [fx, fy],          // Optional: Applied force
+  "ramp_duration": 1e-6       // Optional: Force ramp duration (s)
 }
 ```
 
@@ -97,41 +87,8 @@ Each line defines a point:
   },
   "output": {
     "csv_file": "result.csv",          // Output file path
-    "step_interval": 100,              // Save every N steps
+    "step_interval": 100               // Save every N steps
     // OR
     "time_interval": 1e-4              // Save every T seconds
   }
 }
-```
-
-## Examples
-
-The `examples/` directory contains sample configurations:
-- `2d_plate.*`: A 2D plate with an applied force
-- See `examples/README.md` for details
-
-## Testing
-
-The `test/` directory contains test configurations:
-- `1d_test.*`: Simple 1D rod test
-- `3d_test.*`: 3D cube corner test
-- See `test/README.md` for details
-
-## Output Format
-
-The simulation produces CSV files with:
-- Point positions over time
-- Velocities
-- Forces
-- Damage state
-
-## Contributing
-
-1. Fork the repository
-2. Create your feature branch
-3. Add tests for new features
-4. Submit a pull request
-
-## License
-
-MIT License - See LICENSE file for details

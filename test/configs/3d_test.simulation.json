@@ -1,0 +1,25 @@
+{
+  "horizon": 0.002,
+  "optimization": {
+    "tolerance": 1e-6,
+    "max_iterations": 10,
+    "momentum": 0.1,
+    "gradient_step_size": {
+      "horizon_fraction": 0.0001
+    }
+  },
+  "time_stepping": {
+    "max_step": 1e-5,
+    "total_time": 1e-3,
+    "safety_factor": 0.1,
+    "max_relative_motion": 0.1,
+    "response_lag": 1000
+  },
+  "damping": {
+    "mass_time_constant": 1e-4
+  },
+  "output": {
+    "csv_file": "3d_test_result.csv",
+    "time_interval": 1e-5
+  }
+}

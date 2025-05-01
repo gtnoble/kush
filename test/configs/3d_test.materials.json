@@ -1,0 +1,9 @@
+{
+  "materials": {
+    "titanium": {
+      "density": 4500.0,
+      "youngsModulus": 110e9,
+      "criticalStretch": 0.1
+    }
+  }
+}

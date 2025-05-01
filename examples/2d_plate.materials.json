@@ -1,0 +1,9 @@
+{
+  "materials": {
+    "aluminum": {
+      "density": 2700.0,
+      "youngsModulus": 70e9,
+      "criticalStretch": 10
+    }
+  }
+}

@@ -1,0 +1,3 @@
+Add volume partitioning to material points to allow for non-uniform point spacing.
+  Particle mass would be assigned based on density and partitioned volume.
+  Voronoi tesselation?

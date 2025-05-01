@@ -7,6 +7,8 @@ import math.vector;
 import std.algorithm : min, max;
 import std.math : sqrt, abs, exp, log, tanh, isNaN;
 import std.exception : enforce;
+import std.format : format;
+import io.simulation_loader : OutputConfig;
 
 // Interface for time step calculation strategies
 interface TimeStepStrategy(T, V) {
@@ -115,17 +117,26 @@ class AdaptiveTimeStep(T, V) : TimeStepStrategy!(T, V) {
     }
 }
 
-// Generic simulation function with adaptive time stepping
+// Generic simulation function with adaptive time stepping and output control
 void simulate(T, V)(
     MaterialBody!(T, V) body,
     TimeStepStrategy!(T, V) timeStepStrategy,
     IntegrationStrategy!(T, V) integrator,
-    double totalTime
+    double totalTime,
+    OutputConfig output
 ) if (isMaterialPoint!(T, V)) {
     import std.stdio : writefln;
+    import std.path : stripExtension, baseName;
+    import std.file : copy;
+    
     size_t step = 0;
     double currentTime = 0.0;
     double lastTimeStep = 0.0;
+    double nextOutputTime = 0.0;
+    string lastOutputFile;
+    
+    // Get base filename without extension
+    string baseFile = stripExtension(baseName(output.csv_file));
     
     // Main time stepping loop
     while (currentTime < totalTime) {
@@ -143,16 +154,38 @@ void simulate(T, V)(
             timeStep = totalTime - currentTime;
         }
         
-        // Export state at every step
-        import std.format : format;
-        string filename = format("simulation_step_%04d.csv", step);
-        body.exportToCSV(filename);
-
+        // Handle output based on configuration
+        bool shouldOutput = false;
+        string currentOutputFile;
+        
+        if (output.step_interval > 0 && step % output.step_interval == 0) {
+            // Step-based output
+            currentOutputFile = format("%s_step%05d.csv", baseFile, step);
+            shouldOutput = true;
+        }
+        else if (output.time_interval > 0 && currentTime >= nextOutputTime) {
+            // Time-based output
+            currentOutputFile = format("%s_t%09d.csv", baseFile, 
+                cast(size_t)(currentTime * 1e9));
+            shouldOutput = true;
+            nextOutputTime += output.time_interval;
+        }
+        
+        if (shouldOutput) {
+            body.exportToCSV(currentOutputFile);
+            lastOutputFile = currentOutputFile;
+        }
+        
         // Update system state using integrator
         integrator.integrate(body, timeStep);
         
         currentTime += timeStep;
         ++step;
+    }
+    
+    // Always save final state to requested output file
+    if (lastOutputFile) {
+        copy(lastOutputFile, output.csv_file);
     }
 }
 
@@ -195,8 +228,16 @@ unittest {
         2.0    // responseScaling (ratio of response time to time step)
     );
     
+    // Create integrator for constant velocity test
+    auto integrator = new LagrangianIntegrator!(TestPoint!Vector1D, Vector1D)(null);
+
+    // Create output config for testing
+    OutputConfig output;
+    output.csv_file = "test_constant_velocity.csv";
+    output.step_interval = 10;
+
     // Simulate for 1.0 total time with adaptive stepping
-    simulate(body, timeStepStrategy, 1.0);
+    simulate(body, timeStepStrategy, integrator, 1.0, output);
     
     // After 1 second of simulation, position should be 1.0
     assert(abs(body[0].position[0] - 1.0) < 1e-10);
@@ -239,8 +280,16 @@ unittest {
         2.0    // responseScaling (ratio of response time to time step)
     );
     
-    // Simulate for one period
-    simulate(body, timeStepStrategy, 1.0);
+    // Create integrator for oscillating test
+    auto integrator = new LagrangianIntegrator!(TestPoint!Vector1D, Vector1D)(null);
+
+    // Create output config for testing
+    OutputConfig output;
+    output.csv_file = "test_oscillating.csv";
+    output.time_interval = 0.1;  // Sample at 10 Hz
+
+    // Simulate for one period with output
+    simulate(body, timeStepStrategy, integrator, 1.0, output);
     
     // Position should be close to 0 after one period
     assert(abs(oscillator.position[0]) < 1e-3);

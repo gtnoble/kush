@@ -1,0 +1,29 @@
+{
+  "horizon": 0.001,
+  "optimization": {
+    "tolerance": 1e-6,
+    "max_iterations": 20,
+    "momentum": 0.2,
+    "gradient_step_size": {
+      "horizon_fraction": 0.0001
+    }
+  },
+  "time_stepping": {
+    "max_step": 1e-6,
+    "total_time": 1e-3,
+    "safety_factor": 0.1,
+    "max_relative_motion": 0.05,
+    "response_lag": 1000,
+    "comment": "Small time steps for accurate crack propagation"
+  },
+  "damping": {
+    "mass_time_constant": 1e-5,
+    "viscosity_time_constant": 1e-5,
+    "comment": "Light damping to reduce oscillations"
+  },
+  "output": {
+    "csv_file": "crack_propagation_result.csv",
+    "time_interval": 1e-5,
+    "comment": "Output every 10 microseconds for crack tracking"
+  }
+}

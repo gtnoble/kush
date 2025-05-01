@@ -4,6 +4,38 @@ import core.material_body;
 import core.material_point;
 import math.vector;
 import std.math : abs;
+import core.sys.posix.unistd : fork, pid_t;
+import core.sys.posix.sys.wait : wait;
+import std.socket : Socket, UnixAddress, AddressFamily, SocketType;
+import std.file : remove;
+import std.conv : to;
+import core.stdc.stdlib : exit;
+import std.parallelism : totalCPUs;
+
+private struct GradientMessage(V) {
+    size_t pointIndex;
+    double[V.components.length] components;
+
+    this(size_t index, V gradient) {
+        pointIndex = index;
+        components[] = gradient.components[];
+    }
+
+    V toVector() const {
+        V result = V.zero();
+        result.components[] = components[];
+        return result;
+    }
+
+    void serialize(ref ubyte[] buffer) const {
+        buffer = new ubyte[this.sizeof];
+        (cast(GradientMessage!V*)buffer.ptr)[0] = this;
+    }
+
+    static GradientMessage!V deserialize(const(ubyte)[] buffer) {
+        return *(cast(const(GradientMessage!V)*)buffer.ptr);
+    }
+}
 
 // Interface for integration strategies
 interface IntegrationStrategy(T, V) if (isMaterialPoint!(T, V)) {
@@ -188,43 +220,112 @@ class NelderMeadSolver(T, V) : OptimizationSolver!(T, V) {
         }
 }
 
+// Update mode for gradient descent
+enum GradientUpdateMode {
+    LearningRate,  // Scale gradient by learning rate
+    StepSize       // Move fixed step size in gradient direction
+}
+
 // Gradient Descent solver implementation
 class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
     private:
         double _learningRate = 0.01;
+        double _stepSize = 0.01;
         double _momentum = 0.9;
+        GradientUpdateMode _updateMode = GradientUpdateMode.LearningRate;
         double _gradientStepSize = 1e-6;
         V[] _velocity;  // For momentum calculations
+        size_t _numWorkers;  // Number of worker processes for gradient calculation
         
         // Calculate numerical gradient using finite differences
         V[] calculateGradient(V[] position, ObjectiveFunction!(T, V) objective) {
             const size_t numPoints = position.length;
-            const size_t vectorDim = position[0].components.length;
             auto gradient = new V[numPoints];
+            auto sockets = new Socket[_numWorkers];
+            auto pids = new pid_t[_numWorkers];
+            string[] socketPaths;
             
-            // Initialize gradient vectors
-            foreach (ref g; gradient) {
-                g = V.zero();
+            // Setup sockets
+            foreach (i; 0.._numWorkers) {
+                string socketPath = "/tmp/gradient_" ~ i.to!string;
+                socketPaths ~= socketPath;
+                auto serverSocket = new Socket(AddressFamily.UNIX, SocketType.STREAM);
+                scope(exit) serverSocket.close();
+                serverSocket.bind(new UnixAddress(socketPath));
+                serverSocket.listen(1);
+                
+                pids[i] = fork();
+                if (pids[i] == 0) {
+                    // Child process
+                    serverSocket.close();
+                    
+                    // Connect back to parent
+                    auto socket = new Socket(AddressFamily.UNIX, SocketType.STREAM);
+                    scope(exit) socket.close();
+                    socket.connect(new UnixAddress(socketPath));
+                    
+                    // Calculate gradients for assigned points
+                    for (size_t j = i; j < numPoints; j += _numWorkers) {
+                        auto pointGradient = V.zero();
+                        
+                        // For each component
+                        for (size_t dim = 0; dim < V.components.length; dim++) {
+                            // Forward difference
+                            auto forwardPos = position.dup;
+                            forwardPos[j].components[dim] += _gradientStepSize;
+                            double forwardValue = objective.evaluate(forwardPos);
+                            
+                            // Backward difference
+                            auto backwardPos = position.dup;
+                            backwardPos[j].components[dim] -= _gradientStepSize;
+                            double backwardValue = objective.evaluate(backwardPos);
+                            
+                            // Central difference
+                            pointGradient.components[dim] = 
+                                (forwardValue - backwardValue) / (2.0 * _gradientStepSize);
+                        }
+                        
+                        // Send result to parent
+                        auto msg = GradientMessage!V(j, pointGradient);
+                        ubyte[] buffer;
+                        msg.serialize(buffer);
+                        socket.send(buffer);
+                    }
+                    
+                    exit(0);
+                }
+                
+                // Parent process
+                sockets[i] = serverSocket.accept();
             }
             
-            // For each point
-            for (size_t i = 0; i < numPoints; ++i) {
-                // For each component of the vector
-                for (size_t j = 0; j < vectorDim; ++j) {
-                    // Forward difference
-                    auto forwardPos = position.dup;
-                    forwardPos[i].components[j] += _gradientStepSize;
-                    double forwardValue = objective.evaluate(forwardPos);
-                    
-                    // Backward difference
-                    auto backwardPos = position.dup;
-                    backwardPos[i].components[j] -= _gradientStepSize;
-                    double backwardValue = objective.evaluate(backwardPos);
-                    
-                    // Central difference for this component
-                    gradient[i].components[j] = 
-                        (forwardValue - backwardValue) / (2.0 * _gradientStepSize);
+            // Collect results from workers
+            ubyte[] buffer = new ubyte[GradientMessage!V.sizeof];
+            foreach (i; 0..numPoints) {
+                auto bytesReceived = sockets[i % _numWorkers].receive(buffer);
+                if (bytesReceived == GradientMessage!V.sizeof) {
+                    auto msg = GradientMessage!V.deserialize(buffer);
+                    gradient[msg.pointIndex] = msg.toVector();
                 }
+            }
+            
+            // Create scope guard for cleanup
+            scope(exit) {
+                foreach (socket; sockets) {
+                    if (socket !is null) {
+                        socket.close();
+                    }
+                }
+                // Clean up socket files
+                foreach (path; socketPaths) {
+                    remove(path);
+                }
+            }
+            
+            // Wait for child processes
+            foreach (i; 0.._numWorkers) {
+                int status;
+                wait(&status);
             }
             
             return gradient;
@@ -232,10 +333,15 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
         
     public:
         this(double tolerance = 1e-6, size_t maxIterations = 1000,
-             double learningRate = 0.01, double momentum = 0.9) {
+             double learningRate = 0.01, double stepSize = 0.01,
+             GradientUpdateMode mode = GradientUpdateMode.LearningRate,
+             double momentum = 0.9, size_t numWorkers = totalCPUs) {
             super(tolerance, maxIterations);
             _learningRate = learningRate;
+            _stepSize = stepSize;
+            _updateMode = mode;
             _momentum = momentum;
+            _numWorkers = numWorkers;
         }
         
         override V[] minimize(V[] initialGuess, ObjectiveFunction!(T, V) objective) {
@@ -256,7 +362,14 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
                 
                 // Update velocity and position using momentum
                 for (size_t i = 0; i < n; ++i) {
-                    _velocity[i] = _velocity[i] * _momentum - gradient[i] * _learningRate;
+                    final switch (_updateMode) {
+                        case GradientUpdateMode.LearningRate:
+                            _velocity[i] = _velocity[i] * _momentum - gradient[i] * _learningRate;
+                            break;
+                        case GradientUpdateMode.StepSize:
+                            _velocity[i] = _velocity[i] * _momentum - gradient[i].unit() * _stepSize;
+                            break;
+                    }
                     currentPos[i] = currentPos[i] + _velocity[i];
                 }
                 

@@ -1,0 +1,9 @@
+{
+  "materials": {
+    "steel": {
+      "density": 7850.0,
+      "youngsModulus": 200e9,
+      "criticalStretch": 0.1
+    }
+  }
+}
