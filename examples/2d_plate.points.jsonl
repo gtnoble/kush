@@ -1,4 +1,4 @@
 {"position": [0.0, 0.0], "material": "aluminum", "volume": 1e-9, "fixed_velocity": true}
 {"position": [0.0, 0.001], "material": "aluminum", "volume": 1e-9}
 {"position": [0.001, 0.0], "material": "aluminum", "volume": 1e-9}
-{"position": [0.001, 0.001], "material": "aluminum", "volume": 1e-9, "force": [0.0, 100.0]}
+{"position": [0.001, 0.001], "material": "aluminum", "volume": 1e-9, "force": [0.0, 100000.0]}

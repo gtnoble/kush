@@ -50,7 +50,7 @@ struct TimeSteppingConfig {
         if (characteristic_velocity > 0.0) {
             return characteristic_velocity;
         }
-        return material_wave_speed;
+        return material_wave_speed * 0.01;
     }
 }
 
@@ -206,8 +206,8 @@ private OutputConfig parseOutputConfig(JSONValue json) {
     }
     
     // Handle output intervals (mutually exclusive)
-    bool hasStepInterval = "step_interval" in json;
-    bool hasTimeInterval = "time_interval" in json;
+    bool hasStepInterval = ("step_interval" in json) !is null;
+    bool hasTimeInterval = ("time_interval" in json) !is null;
     
     enforce(hasStepInterval || hasTimeInterval, 
         "Either step_interval or time_interval must be specified");

@@ -2,7 +2,7 @@ module core.damper;
 
 import math.vector;
 import core.material_point : isVector;
-import std.math : abs;
+import std.math : abs, isNaN;
 
 // Unified damper interface that handles both global and bond damping
 interface Damper(V) if (isVector!V) {
@@ -58,7 +58,7 @@ class StandardDamper(V) : Damper!V if (isVector!V) {
     // Implement global damping (mass and stiffness)
     V calculateGlobalForce(V velocity, double mass) const {
         // Early return if mass damping is disabled (infinite time constant)
-        if (_massTimeConstant == double.infinity) {
+        if (_massTimeConstant == double.infinity || isNaN(_massTimeConstant)) {
             return V.zero();
         }
         // Mass damping: F = -mv/τₘ
@@ -72,7 +72,7 @@ class StandardDamper(V) : Damper!V if (isVector!V) {
         double mass
     ) const {
         // Early return if viscosity is disabled (infinite time constant)
-        if (_viscosityTimeConstant == double.infinity) {
+        if (_viscosityTimeConstant == double.infinity || isNaN(_viscosityTimeConstant)) {
             return V.zero();
         }
         

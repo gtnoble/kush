@@ -5,7 +5,7 @@
     "max_iterations": 10,
     "momentum": 0.1,
     "gradient_step_size": {
-      "horizon_fraction": 0.0001
+      "horizon_fraction": 0.01
     }
   },
   "time_stepping": {

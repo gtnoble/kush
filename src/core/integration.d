@@ -14,16 +14,20 @@ import std.parallelism : totalCPUs;
 
 private struct GradientMessage(V) {
     size_t pointIndex;
-    double[V.components.length] components;
+    double[V.dimension] components;
 
     this(size_t index, V gradient) {
         pointIndex = index;
-        components[] = gradient.components[];
+        foreach (i; 0..V.dimension) {
+            components[i] = gradient[i];
+        }
     }
 
     V toVector() const {
         V result = V.zero();
-        result.components[] = components[];
+        foreach (i; 0..V.dimension) {
+            result[i] = components[i];
+        }
         return result;
     }
 
@@ -269,19 +273,19 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
                         auto pointGradient = V.zero();
                         
                         // For each component
-                        for (size_t dim = 0; dim < V.components.length; dim++) {
+                        for (size_t dim = 0; dim < V.dimension; dim++) {
                             // Forward difference
                             auto forwardPos = position.dup;
-                            forwardPos[j].components[dim] += _gradientStepSize;
+                            forwardPos[j][dim] += _gradientStepSize;
                             double forwardValue = objective.evaluate(forwardPos);
                             
                             // Backward difference
                             auto backwardPos = position.dup;
-                            backwardPos[j].components[dim] -= _gradientStepSize;
+                            backwardPos[j][dim] -= _gradientStepSize;
                             double backwardValue = objective.evaluate(backwardPos);
                             
                             // Central difference
-                            pointGradient.components[dim] = 
+                            pointGradient[dim] = 
                                 (forwardValue - backwardValue) / (2.0 * _gradientStepSize);
                         }
                         

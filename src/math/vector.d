@@ -25,24 +25,24 @@ struct Vector(size_t N) if (N >= 1 && N <= 3) {
     
     static if (N == 2) {
         static if (is(double2)) {  // Check if SIMD type is available
-            union {
+            package union {
                 double[2] components;
                 double2 simdComponents;
             }
         } else {
-            double[2] components;
+            package double[2] components;
         }
     } else static if (N == 3) {
         static if (is(double4)) {  // AVX double vector
-            union {
+            package union {
                 double[3] components;
                 double4 simdComponents;  // We'll only use first 3 components
             }
         } else {
-            double[3] components;
+            package double[3] components;
         }
     } else {
-        double[N] components;  // 1D case remains scalar
+        package double[N] components;  // 1D case remains scalar
     }
     
     // Constructor with variadic arguments
@@ -51,15 +51,14 @@ struct Vector(size_t N) if (N >= 1 && N <= 3) {
         static if (N == 2 && is(double2)) {
             components[0] = values[0];
             components[1] = values[1];
-            return;
         } else static if (N == 3 && is(double4)) {
             components[0] = values[0];
             components[1] = values[1];
             components[2] = values[2];
-            return;
-        }
-        foreach (i; 0..N) {
-            components[i] = values[i];
+        } else {
+            foreach (i; 0..N) {
+                components[i] = values[i];
+            }
         }
     }
     
@@ -84,8 +83,9 @@ struct Vector(size_t N) if (N >= 1 && N <= 3) {
             return *(&simdComponents[0] + i);
         } else static if (N == 3 && is(double4)) {
             return *(&simdComponents[0] + i);
+        } else {
+            return components[i];
         }
-        return components[i];
     }
     
     // Const index operator for access
@@ -95,8 +95,9 @@ struct Vector(size_t N) if (N >= 1 && N <= 3) {
             return simdComponents[i];
         } else static if (N == 3 && is(double4)) {
             return simdComponents[i];
+        } else {
+            return components[i];
         }
-        return components[i];
     }
     
     // Vector addition with SIMD support
