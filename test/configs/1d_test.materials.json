@@ -1,9 +1,16 @@
 {
   "materials": {
-    "steel": {
+    "steel_base": {
       "density": 7850.0,
       "youngsModulus": 200e9,
-      "criticalStretch": 0.1
+      "criticalStretch": 10
+    },
+    "fixed_end": {
+      "fixed_velocity": true
+    },
+    "loaded_end": {
+      "force": [1000.0],
+      "ramp_duration": 1e-6
     }
   }
 }

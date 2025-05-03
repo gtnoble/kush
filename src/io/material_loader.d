@@ -7,20 +7,39 @@ import std.file : readText;
 import std.exception : enforce;
 import std.array;
 import std.format : format;
+import std.algorithm : map, filter, minElement;
 import math.vector;
 
 /// Material properties loaded from JSON
 struct MaterialConfig(V) {
-    // Physical properties (required)
-    double density;
-    double youngsModulus;
-    double criticalStretch;
+    // Physical properties
+    double density = 0.0;
+    double youngsModulus = 0.0;
+    double criticalStretch = 0.0;
     
     // Optional properties with defaults
     V velocity = V.zero();
     bool fixed_velocity = false;
     V force = V.zero();
     double ramp_duration = 1e-6;
+
+    /// Merge this config with another, with the other's properties taking precedence
+    MaterialConfig!V merge(const ref MaterialConfig!V other) const {
+        MaterialConfig!V result = this;
+        
+        // Only override non-zero values from other config
+        if (other.density > 0.0) result.density = other.density;
+        if (other.youngsModulus > 0.0) result.youngsModulus = other.youngsModulus;
+        if (other.criticalStretch > 0.0) result.criticalStretch = other.criticalStretch;
+        
+        // Override optional properties if they differ from defaults
+        if (other.velocity != V.zero()) result.velocity = other.velocity;
+        if (other.fixed_velocity != false) result.fixed_velocity = other.fixed_velocity;
+        if (other.force != V.zero()) result.force = other.force;
+        if (other.ramp_duration != 1e-6) result.ramp_duration = other.ramp_duration;
+        
+        return result;
+    }
 }
 
 /// Contains all material configurations indexed by name
@@ -33,17 +52,39 @@ struct MaterialsConfig(V) {
         
         // Calculate wave speed for each material: sqrt(E/ρ)
         double[] waveSpeeds = materials.values
+            .filter!(m => m.density > 0.0 && m.youngsModulus > 0.0)  // Only consider complete materials
             .map!(m => sqrt(m.youngsModulus / m.density))
             .array;
             
-        enforce(waveSpeeds.length > 0, "No materials defined");
+        enforce(waveSpeeds.length > 0, "No complete materials defined with density and Young's modulus");
         return waveSpeeds.minElement;
     }
     
     /// Get a material by name, throw if not found
     ref const(MaterialConfig!V) getMaterial(string name) const {
-        enforce(name in materials, "Material not found: " ~ name);
+        enforce(name in materials, "Material group not found: " ~ name);
         return materials[name];
+    }
+
+    /// Merge properties from multiple material groups in sequence
+    MaterialConfig!V mergeGroups(const string[] groupNames) const {
+        enforce(groupNames.length > 0, "At least one material group must be specified");
+        
+        // Start with empty config and merge each group in sequence
+        MaterialConfig!V result;
+        foreach (name; groupNames) {
+            result = result.merge(getMaterial(name));
+        }
+
+        // Validate final configuration has required properties
+        enforce(result.density > 0.0, 
+            "No density defined in material groups: [%(%s, %)]".format(groupNames));
+        enforce(result.youngsModulus > 0.0, 
+            "No Young's modulus defined in material groups: [%(%s, %)]".format(groupNames));
+        enforce(result.criticalStretch > 0.0, 
+            "No critical stretch defined in material groups: [%(%s, %)]".format(groupNames));
+            
+        return result;
     }
 }
 
@@ -68,22 +109,23 @@ private V parseVector(V)(JSONValue json) {
 
 /// Parse a material configuration from JSON
 private MaterialConfig!V parseMaterialConfig(V)(JSONValue json) {
-    // Required fields
-    enforce("density" in json, "Missing required field: density");
-    enforce("youngsModulus" in json, "Missing required field: youngsModulus");
-    enforce("criticalStretch" in json, "Missing required field: criticalStretch");
-    
     MaterialConfig!V config;
     
-    // Parse required fields
-    config.density = json["density"].get!double;
-    config.youngsModulus = json["youngsModulus"].get!double;
-    config.criticalStretch = json["criticalStretch"].get!double;
+    // Parse physical properties if present
+    if ("density" in json) {
+        config.density = json["density"].get!double;
+        enforce(config.density > 0.0, "Density must be positive");
+    }
     
-    // Validate required fields
-    enforce(config.density > 0.0, "Density must be positive");
-    enforce(config.youngsModulus > 0.0, "Young's modulus must be positive");
-    enforce(config.criticalStretch > 0.0, "Critical stretch must be positive");
+    if ("youngsModulus" in json) {
+        config.youngsModulus = json["youngsModulus"].get!double;
+        enforce(config.youngsModulus > 0.0, "Young's modulus must be positive");
+    }
+    
+    if ("criticalStretch" in json) {
+        config.criticalStretch = json["criticalStretch"].get!double;
+        enforce(config.criticalStretch > 0.0, "Critical stretch must be positive");
+    }
     
     // Parse optional fields
     if ("velocity" in json) {

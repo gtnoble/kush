@@ -1,9 +1,16 @@
 {
   "materials": {
-    "aluminum": {
+    "aluminum_base": {
       "density": 2700.0,
       "youngsModulus": 70e9,
       "criticalStretch": 10
+    },
+    "fixed_boundary": {
+      "fixed_velocity": true
+    },
+    "loaded_edge": {
+      "force": [0.0, 100000.0],
+      "ramp_duration": 1e-6
     }
   }
 }

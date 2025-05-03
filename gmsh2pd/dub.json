@@ -1,0 +1,14 @@
+{
+    "name": "gmsh2pd",
+    "description": "GMSH mesh to peridynamics points converter",
+    "authors": ["G.T. Noble"],
+    "targetType": "executable",
+    "mainSourceFile": "src/main.d",
+    "configurations": [
+        {
+            "name": "default",
+            "targetType": "executable",
+            "libs": ["gmsh"]
+        }
+    ]
+}

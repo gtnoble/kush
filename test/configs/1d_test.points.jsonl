@@ -1,5 +1,5 @@
-{"position": [0.0], "material": "steel", "volume": 2.5e-10, "fixed_velocity": true}
-{"position": [0.0005], "material": "steel", "volume": 2.5e-10}
-{"position": [0.001], "material": "steel", "volume": 2.5e-10}
-{"position": [0.0015], "material": "steel", "volume": 2.5e-10}
-{"position": [0.002], "material": "steel", "volume": 2.5e-10, "force": [100.0]}
+{"position": [0.0], "material_groups": ["steel_base", "fixed_end"], "volume": 2.5e-10}
+{"position": [0.0005], "material_groups": ["steel_base"], "volume": 2.5e-10}
+{"position": [0.001], "material_groups": ["steel_base"], "volume": 2.5e-10}
+{"position": [0.0015], "material_groups": ["steel_base"], "volume": 2.5e-10}
+{"position": [0.002], "material_groups": ["steel_base", "loaded_end"], "volume": 2.5e-10}

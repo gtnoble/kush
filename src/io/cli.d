@@ -119,8 +119,8 @@ private:
         // Create points
         BondBasedPoint!V[] bondedPoints;
         foreach (pointConfig; pointConfigs) {
-            // Get material properties
-            auto material = materials.getMaterial(pointConfig.material);
+            // Get material properties by merging groups
+            auto material = materials.mergeGroups(pointConfig.material_groups);
             
             // Create damper
             auto damper = new StandardDamper!V(
@@ -129,31 +129,17 @@ private:
                 simConfig.damping.viscosity_time_constant
             );
             
-            // Combine point and material settings
-            V effectiveVelocity = pointConfig.velocity;
-            if (material.velocity != V.zero()) {
-                effectiveVelocity = material.velocity;
-            }
-            
-            bool effectiveFixedVelocity = pointConfig.fixed_velocity;
-            if (material.fixed_velocity) {
-                effectiveFixedVelocity = true;
-            }
-            
-            // Sum point and material forces
-            V totalForce = pointConfig.force + material.force;
-            
-            // Create point
+            // Create point (properties come from merged material)
             bondedPoints ~= new BondBasedPoint!V(
                 pointConfig.position,
                 calculateMass!V(material.density, pointConfig.volume),
                 calculateBondStiffness!V(material.youngsModulus, simConfig.horizon),
                 material.criticalStretch,
                 damper,
-                effectiveVelocity,
-                effectiveFixedVelocity,
-                totalForce,
-                pointConfig.ramp_duration
+                material.velocity,
+                material.fixed_velocity,
+                material.force,
+                material.ramp_duration
             );
         }
         

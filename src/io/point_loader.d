@@ -3,18 +3,16 @@ module io.point_loader;
 import std.json;
 import std.stdio;
 import std.conv;
+import std.algorithm : map;
+import std.array : array;
 import core.material_point;
 import math.vector;
 
 /// Configuration for a point loaded from JSON
 struct PointConfig(V) {
-    V position;
-    string material;
-    double volume;          // Required: Volume of the point
-    V velocity = V.zero();     // Optional: Initial velocity
-    bool fixed_velocity;       // Optional: If true, velocity remains constant
-    V force = V.zero();       // Optional: Constant force applied to point
-    double ramp_duration = 1e-6;  // Optional: Force ramp duration
+    V position;                    // Required: Position in space
+    string[] material_groups;      // Required: Array of material group names
+    double volume;                 // Required: Volume of the point
 }
 
 /// Parse a vector from a JSON array
@@ -46,40 +44,29 @@ PointConfig!V parsePointConfig(V)(string jsonLine) {
     // Parse JSON line
     JSONValue json = parseJSON(jsonLine);
     
-    // Required fields
+    // Validate required fields exist
     enforce("position" in json, "Missing required field: position");
-    enforce("material" in json, "Missing required field: material");
-    
+    enforce("material_groups" in json, "Missing required field: material_groups");
+    enforce("volume" in json, "Missing required field: volume");
+
     PointConfig!V config;
     
-    // Parse position (required)
+    // Parse position vector
     config.position = parseVector!V(json["position"]);
     
-    // Parse material reference (required)
-    config.material = json["material"].get!string;
-    
-    // Parse volume (required)
-    enforce("volume" in json, "Missing required field: volume");
+    // Parse material groups array
+    enforce(json["material_groups"].type == JSONType.array,
+        "material_groups must be an array of strings");
+    config.material_groups = json["material_groups"]
+        .array
+        .map!(v => v.get!string)
+        .array;
+    enforce(config.material_groups.length > 0,
+        "At least one material group must be specified");
+
+    // Parse volume
     config.volume = json["volume"].get!double;
     enforce(config.volume > 0.0, "Volume must be positive");
-    
-    // Parse optional fields
-    if ("velocity" in json) {
-        config.velocity = parseVector!V(json["velocity"]);
-    }
-    
-    if ("fixed_velocity" in json) {
-        config.fixed_velocity = json["fixed_velocity"].get!bool;
-    }
-    
-    if ("force" in json) {
-        config.force = parseVector!V(json["force"]);
-    }
-    
-    if ("ramp_duration" in json) {
-        config.ramp_duration = json["ramp_duration"].get!double;
-        enforce(config.ramp_duration > 0.0, "Ramp duration must be positive");
-    }
     
     return config;
 }
