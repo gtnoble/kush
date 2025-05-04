@@ -7,6 +7,7 @@ import std.algorithm : map;
 import std.array : array;
 import core.material_point;
 import math.vector;
+import io.material_loader : MaterialsConfig;
 
 /// Configuration for a point loaded from JSON
 struct PointConfig(V) {
@@ -71,8 +72,8 @@ PointConfig!V parsePointConfig(V)(string jsonLine) {
     return config;
 }
 
-/// Load point configurations from a JSONL file
-PointConfig!V[] loadPointConfigs(V)(string filepath) {
+/// Load point configurations from a JSONL file and update material group counts
+PointConfig!V[] loadPointConfigs(V)(string filepath, ref MaterialsConfig!V materials) {
     import std.exception : enforce;
     import std.file : exists;
     
@@ -83,7 +84,14 @@ PointConfig!V[] loadPointConfigs(V)(string filepath) {
     
     // Process file line by line
     foreach (line; file.byLine) {
-        configs ~= parsePointConfig!V(line.idup);
+        auto config = parsePointConfig!V(line.idup);
+        
+        // Update point counts for each material group
+        foreach (group; config.material_groups) {
+            materials.incrementPointCount(group);
+        }
+        
+        configs ~= config;
     }
     
     enforce(configs.length > 0, "No points found in file: " ~ filepath);

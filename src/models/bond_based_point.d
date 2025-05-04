@@ -2,6 +2,7 @@ module models.bond_based_point;
 
 import core.material_point;
 import core.damper : Damper;
+import core.velocity_constraint : VelocityConstraint;
 import math.vector;
 import std.math : abs;
 import std.typecons : Nullable;
@@ -21,10 +22,19 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
     private V _constantForce;  // Store constant external force
     private double _timeElapsed;      // Track simulation time
     private V _targetForce;          // Final force magnitude
+    private VelocityConstraint!V* _velocityConstraint;  // Velocity constraint (pointer to allow null checks)
     private double _rampDuration;     // Time to reach target force
 
     // Interface implementation
     @property V position() const { return _position; }
+    
+    @property const(VelocityConstraint!V*) velocityConstraint() const {
+        return _velocityConstraint;
+    }
+    
+    @property void velocityConstraint(VelocityConstraint!V* constraint) {
+        _velocityConstraint = constraint;
+    }
     @property V referencePosition() const { return _referencePosition; }
     @property V velocity() const { return _velocity; }
     @property void velocity(V vel) {
@@ -33,6 +43,7 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
         }
     }
     @property void position(V newPos) { _position = newPos; }
+    @property double mass() const { return _mass; }
     
     // Material properties
     private double _bondStiffness;  // Bond stiffness constant
@@ -48,7 +59,7 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
         Damper!V damper,               // Damping strategy
         V initialVelocity = V.zero(),
         bool fixedVelocity = false,
-        V targetForce = V.zero(),     // Target force at end of ramp
+        V targetForce = V.zero(),     // Target force at end of ramp (already scaled by point count)
         double rampDuration = 1e-6    // Duration of force ramp (default 1μs)
     ) {
         _referencePosition = refPos;
@@ -121,12 +132,14 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
         
         // Bond damping dissipation
         foreach (neighbor; neighbors) {
-            V proposedRelativeVelocity = (neighbor._velocity - proposedVelocity);
+            // Calculate proposed and reference vectors for dissipation
             V propVector = neighbor._position - proposedPosition;
+            V refVector = neighbor.referencePosition - _referencePosition;
+            V displacement = propVector - refVector;
             
             totalDissipation += _damper.calculateBondDissipation(
-                proposedRelativeVelocity,
-                propVector,
+                neighbor._velocity - proposedVelocity,  // Relative velocity
+                displacement,  // Use displacement direction for damping
                 _mass,
                 timeStep
             );
@@ -140,11 +153,13 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
         return kineticEnergy - potentialEnergy - totalDissipation;
     }
     
-    // Check if a bond is under compression
+    // Check if a bond is under compression using displacement direction
     private bool isCompressing(const(BondBasedPoint!V) neighbor) const {
         V relativeVelocity = neighbor.velocity - _velocity;
-        V bondVector = neighbor.position - _position;
-        return relativeVelocity.dot(bondVector) < 0;
+        V refVector = neighbor.referencePosition - _referencePosition;
+        V curVector = neighbor.position - _position;
+        V displacement = curVector - refVector;
+        return relativeVelocity.dot(displacement) < 0;
     }
 
     // Calculate bond force between two points with reversible damage
@@ -152,6 +167,7 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
         // Calculate reference and current vectors between points
         V refVector = neighbor.referencePosition - _referencePosition;
         V curVector = neighbor.position - _position;
+        V displacement = curVector - refVector;  // Calculate displacement once for reuse
         
         double refLength = refVector.magnitude();
         double curLength = curVector.magnitude();
@@ -165,14 +181,15 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
             return V.zero();
         }
         
-        // Bond force calculation (linear micropotential)
-        V elasticForce = curVector.unit() * (_bondStiffness * stretch);
+        // Bond force calculation using displacement direction
+        V forceDirection = displacement.unit();  // Unit vector in direction of deformation
+        V elasticForce = forceDirection * (_bondStiffness * stretch);
         
         // Add bond damping only during compression
         if (isCompressing(neighbor)) {
             return elasticForce + _damper.calculateBondForce(
                 neighbor.velocity - _velocity,
-                curVector,
+                displacement,  // Use displacement for damping direction
                 _mass
             );
         }
@@ -197,33 +214,5 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
         _constantForce = _targetForce * rampFactor;  // Linear interpolation
         
         return elasticForce + dampingForce + _constantForce;
-    }
-    
-    // Velocity Verlet integration state update implementation
-    void updateState(const(BondBasedPoint!V)[] neighbors, double timeStep) {
-        if (_isVelocityFixed) {
-            // For fixed velocity points, just update position
-            _position = _position + _velocity * timeStep;
-            return;
-        }
-        
-        // Update time for force ramping
-        _timeElapsed += timeStep;
-        
-        // 1. Calculate initial forces
-        V initialForce = calculateTotalForce(neighbors);
-        
-        // 2. Update velocity by half timestep
-        V halfStepVelocity = _velocity + initialForce * (timeStep * 0.5 / _mass);
-        
-        // 3. Update position using half-step velocity
-        _position = _position + halfStepVelocity * timeStep;
-        
-        // 4. Calculate new forces at updated position
-        V newForce = calculateTotalForce(neighbors);
-        
-        // 5. Complete velocity update with new forces
-        _velocity = halfStepVelocity + newForce * (timeStep * 0.5 / _mass);
-        enforce(velocity.magnitudeSquared() < SPEED_OF_LIGHT ^^ 2, "Velocity exceeds speed of light");
     }
 }

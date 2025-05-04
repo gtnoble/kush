@@ -8,7 +8,9 @@ A flexible, type-safe implementation of peridynamics in the D programming langua
 - Configuration-based simulation setup
 - Bond-based peridynamic model
 - Adaptive time stepping
-- Gradient descent optimization
+- Multiple optimization methods:
+  - Gradient descent with momentum
+  - Parallel tempering for non-convex problems
 - Line-delimited JSON for point configurations
 - CSV output for analysis
 
@@ -74,12 +76,20 @@ Each line defines a point:
 {
   "horizon": 0.003,            // Horizon radius (m)
   "optimization": {
-    "tolerance": 1e-6,         // Convergence tolerance
-    "max_iterations": 10,      // Maximum iterations per step
-    "momentum": 0.1,           // Momentum term [0,1)
+    "solver_type": "gradient_descent",  // "gradient_descent" or "parallel_tempering"
+    "tolerance": 1e-6,                  // Convergence tolerance
+    "max_iterations": 10,               // Maximum iterations per step
+    "momentum": 0.9,                    // Momentum term [0,1)
+    "gradient_mode": "step_size",       // "step_size" (default) or "learning_rate"
+    "learning_rate": 0.01,             // Learning rate (for gradient descent)
     "gradient_step_size": {
-      "value": 1e-4,           // Fixed step size
-      "horizon_fraction": 0.0001 // Optional: step = horizon * fraction
+      "value": 1e-4,                   // Fixed step size (for gradient descent)
+      "horizon_fraction": 0.0001       // Optional: step = horizon * fraction
+    },
+    "parallel_tempering": {            // Only used when solver_type is "parallel_tempering"
+      "num_replicas": 8,              // Optional: defaults to CPU core count
+      "min_temperature": 0.1,         // Controls local optimization (cold replicas)
+      "max_temperature": 2.0          // Controls global exploration (hot replicas)
     }
   },
   "time_stepping": {

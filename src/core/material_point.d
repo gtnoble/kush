@@ -1,6 +1,7 @@
 module core.material_point;
 
 import math.vector;
+import core.velocity_constraint;
 
 // Generic MaterialPoint interface that takes both the concrete type T and vector type V
 interface MaterialPoint(T, V) if (is(V == Vector!N, size_t N)) {
@@ -10,11 +11,17 @@ interface MaterialPoint(T, V) if (is(V == Vector!N, size_t N)) {
     @property V velocity() const;
     @property void velocity(V vel);
 
+    // Velocity constraint
+    @property const(VelocityConstraint!V*) velocityConstraint() const;
+    @property void velocityConstraint(VelocityConstraint!V* constraint);
+
+    // Mass property
+    @property double mass() const;
+
     // Lagrangian calculation
     double computeLagrangian(const(T)[] neighbors, V proposedPosition, double timeStep) const;
     
     // State update methods
-    void updateState(const(T)[] neighbors, double timeStep);
     void position(V newPosition);
 }
 

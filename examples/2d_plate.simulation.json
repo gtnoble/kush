@@ -1,25 +1,31 @@
 {
   "horizon": 0.003,
   "optimization": {
+    "solver_type": "parallel_tempering",
     "tolerance": 1e-6,
-    "max_iterations": 10,
-    "momentum": 0.1,
+    "max_iterations": 1000,
     "gradient_step_size": {
-      "horizon_fraction": 0.01
+      "horizon_fraction": 0.001
+    },
+    "parallel_tempering": {
+      "min_temperature": 0.0001,
+      "max_temperature": 1
     }
   },
   "time_stepping": {
-    "max_step": 1e-4,
-    "total_time": 3e-3,
+    "initial_step": 1e-9,
+    "max_step": 5e-6,
+    "total_time": 1e-4,
     "safety_factor": 0.1,
     "max_relative_motion": 0.1,
     "response_lag": 1000
   },
   "damping": {
-    "mass_time_constant": 1e-4
+    "mass_time_constant": 1e-10,
+    "viscosity_time_constant": 1e-10
   },
   "output": {
     "csv_file": "2d_plate_result.csv",
-    "step_interval": 100
+    "step_interval": 1
   }
 }

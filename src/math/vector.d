@@ -18,199 +18,246 @@ static this() {
         is(double4) ? "yes" : "no");
 }
 
-// Generic Vector template for any dimension
-struct Vector(size_t N) if (N >= 1 && N <= 3) {
-    /// Static dimension property
-    enum dimension = N;
-    
-    static if (N == 2) {
-        static if (is(double2)) {  // Check if SIMD type is available
-            package union {
-                double[2] components;
-                double2 simdComponents;
-            }
-        } else {
-            package double[2] components;
-        }
-    } else static if (N == 3) {
-        static if (is(double4)) {  // AVX double vector
-            package union {
-                double[3] components;
-                double4 simdComponents;  // We'll only use first 3 components
-            }
-        } else {
-            package double[3] components;
-        }
+// Generic Vector template with compile-time or runtime dimension
+struct Vector(size_t N = 0) {
+    // Static dimension for compile-time sized vectors
+    static if (N > 0) {
+        enum dimension = N;
+        
+        // Select storage type at compile time
+        static if (N == 2 && is(double2))
+            private double2 _components;
+        else static if (N == 3 && is(double4))
+            private double4 _components;
+        else
+            private double[N] _components;
+            
     } else {
-        package double[N] components;  // 1D case remains scalar
+        private double[] _components;
+        private size_t _dimension;
+        @property size_t dimension() const { return _dimension; }
     }
     
-    // Constructor with variadic arguments
-    this(double[] values...) {
-        assert(values.length == N, "Wrong number of components");
-        static if (N == 2 && is(double2)) {
-            components[0] = values[0];
-            components[1] = values[1];
-        } else static if (N == 3 && is(double4)) {
-            components[0] = values[0];
-            components[1] = values[1];
-            components[2] = values[2];
-        } else {
-            foreach (i; 0..N) {
-                components[i] = values[i];
+    // Constructor for compile-time dimension
+    static if (N > 0) {
+        this(double[] values...) {
+            assert(values.length == N, "Wrong number of components");
+            static if (N == 2 && is(double2)) {
+                _components[0] = values[0];
+                _components[1] = values[1];
+            } else static if (N == 3 && is(double4)) {
+                _components[0] = values[0];
+                _components[1] = values[1];
+                _components[2] = values[2];
+            } else {
+                _components[0..N] = values[0..N];
             }
         }
     }
+    // Constructors for runtime dimension
+    else {
+        this(size_t dim) {
+            _dimension = dim;
+            _components = new double[dim];
+        }
+        
+        this(double[] values) {
+            _dimension = values.length;
+            _components = values.dup;
+        }
+    }
     
-    // Default constructor initializes to zero
+    // Create zero vector
     static Vector!N zero() {
-        Vector!N result;
-        static if (N == 2 && is(double2)) {
-            result.simdComponents = 0;
-        } else static if (N == 3 && is(double4)) {
-            result.simdComponents = 0;
+        static if (N > 0) {
+            Vector!N result;
+            static if (N == 2 && is(double2)) {
+                result._components = 0;
+            } else static if (N == 3 && is(double4)) {
+                result._components = 0;
+            } else {
+                result._components[] = 0;
+            }
+            return result;
         } else {
-            result.components[] = 0;
+            return Vector!N(0);
         }
-
-        return result;
     }
     
-    // Index operator for access
+    // Create zero vector with runtime dimension
+    static Vector!N zero(size_t dim) {
+        static if (N == 0) {
+            auto result = Vector!N(dim);
+            result._components[] = 0;
+            return result;
+        } else {
+            assert(dim == N, "Dimension mismatch");
+            return zero();
+        }
+    }
+    
+    // Index operator
     ref double opIndex(size_t i) {
-        assert(i < N, "Index out of bounds");
-        static if (N == 2 && is(double2)) {
-            return *(&simdComponents[0] + i);
-        } else static if (N == 3 && is(double4)) {
-            return *(&simdComponents[0] + i);
+        static if (N > 0) {
+            assert(i < N, "Index out of bounds");
         } else {
-            return components[i];
+            assert(i < _dimension, "Index out of bounds");
         }
+        return _components[i];
     }
     
-    // Const index operator for access
+    // Const index operator
     double opIndex(size_t i) const {
-        assert(i < N, "Index out of bounds");
-        static if (N == 2 && is(double2)) {
-            return simdComponents[i];
-        } else static if (N == 3 && is(double4)) {
-            return simdComponents[i];
+        static if (N > 0) {
+            assert(i < N, "Index out of bounds");
         } else {
-            return components[i];
+            assert(i < _dimension, "Index out of bounds");
         }
+        return _components[i];
     }
     
-    // Vector addition with SIMD support
+    // Vector addition
     Vector!N opBinary(string op)(Vector!N other) const
         if (op == "+") {
-        Vector!N result;
-        static if (N == 2 && is(double2)) {
-            result.simdComponents = simdComponents + other.simdComponents;
-        } else static if (N == 3 && is(double4)) {
-            result.simdComponents = simdComponents + other.simdComponents;
-        } else {
-            foreach (i; 0..N) {
-                result.components[i] = components[i] + other.components[i];
+        static if (N > 0) {
+            Vector!N result;
+            static if (N == 2 && is(double2)) {
+                result._components = _components + other._components;
+            } else static if (N == 3 && is(double4)) {
+                result._components = _components + other._components;
+            } else {
+                result._components[] = _components[] + other._components[];
             }
+            return result;
+        } else {
+            assert(_dimension == other._dimension, "Dimension mismatch");
+            auto result = Vector!N(_dimension);
+            result._components[] = _components[] + other._components[];
+            return result;
         }
-        return result;
     }
     
-    // Vector subtraction with SIMD support
+    // Vector subtraction
     Vector!N opBinary(string op)(Vector!N other) const
         if (op == "-") {
-        Vector!N result;
-        static if (N == 2 && is(double2)) {
-            result.simdComponents = simdComponents - other.simdComponents;
-        } else static if (N == 3 && is(double4)) {
-            result.simdComponents = simdComponents - other.simdComponents;
-        } else {
-            foreach (i; 0..N) {
-                result.components[i] = components[i] - other.components[i];
+        static if (N > 0) {
+            Vector!N result;
+            static if (N == 2 && is(double2)) {
+                result._components = _components - other._components;
+            } else static if (N == 3 && is(double4)) {
+                result._components = _components - other._components;
+            } else {
+                result._components[] = _components[] - other._components[];
             }
+            return result;
+        } else {
+            assert(_dimension == other._dimension, "Dimension mismatch");
+            auto result = Vector!N(_dimension);
+            result._components[] = _components[] - other._components[];
+            return result;
         }
-        return result;
     }
     
-    // Scalar multiplication with SIMD support
+    // Scalar multiplication
     Vector!N opBinary(string op)(double scalar) const
         if (op == "*") {
-        Vector!N result;
-        static if (N == 2 && is(double2)) {
-            result.simdComponents = simdComponents * scalar;
-        } else static if (N == 3 && is(double4)) {
-            result.simdComponents = simdComponents * scalar;
-        } else {
-            foreach (i; 0..N) {
-                result.components[i] = components[i] * scalar;
+        static if (N > 0) {
+            Vector!N result;
+            static if (N == 2 && is(double2)) {
+                result._components = _components * scalar;
+            } else static if (N == 3 && is(double4)) {
+                result._components = _components * scalar;
+            } else {
+                result._components[] = _components[] * scalar;
             }
+            return result;
+        } else {
+            auto result = Vector!N(_dimension);
+            result._components[] = _components[] * scalar;
+            return result;
         }
-        return result;
     }
     
     // Scalar multiplication (scalar on left)
     Vector!N opBinaryRight(string op)(double scalar) const
         if (op == "*") {
-        return this * scalar;  // Reuse right multiplication
+        return this * scalar;
     }
     
-    // Scalar division with SIMD support
+    // Scalar division
     Vector!N opBinary(string op)(double scalar) const
         if (op == "/") {
-        Vector!N result;
-        static if (N == 2 && is(double2)) {
-            result.simdComponents = simdComponents / scalar;
-        } else static if (N == 3 && is(double4)) {
-            result.simdComponents = simdComponents / scalar;
-        } else {
-            foreach (i; 0..N) {
-                result.components[i] = components[i] / scalar;
+        static if (N > 0) {
+            Vector!N result;
+            static if (N == 2 && is(double2)) {
+                result._components = _components / scalar;
+            } else static if (N == 3 && is(double4)) {
+                result._components = _components / scalar;
+            } else {
+                result._components[] = _components[] / scalar;
             }
+            return result;
+        } else {
+            auto result = Vector!N(_dimension);
+            result._components[] = _components[] / scalar;
+            return result;
         }
-        return result;
     }
     
-    // Unary negation with SIMD support
+    // Unary negation
     Vector!N opUnary(string op)() const
         if (op == "-") {
-        Vector!N result;
-        static if (N == 2 && is(double2)) {
-            result.simdComponents = -simdComponents;
-        } else static if (N == 3 && is(double4)) {
-            result.simdComponents = -simdComponents;
-        } else {
-            foreach (i; 0..N) {
-                result.components[i] = -components[i];
+        static if (N > 0) {
+            Vector!N result;
+            static if (N == 2 && is(double2)) {
+                result._components = -_components;
+            } else static if (N == 3 && is(double4)) {
+                result._components = -_components;
+            } else {
+                result._components[] = -_components[];
             }
+            return result;
+        } else {
+            auto result = Vector!N(_dimension);
+            result._components[] = -_components[];
+            return result;
         }
-        return result;
     }
     
-    // Dot product with SIMD support
-    double dot(Vector!N other) const {
-        static if (N == 2 && is(double2)) {
-            auto prod = simdComponents * other.simdComponents;
-            return prod[0] + prod[1];
-        } else static if (N == 3 && is(double4)) {
-            auto prod = simdComponents * other.simdComponents;
-            return prod[0] + prod[1] + prod[2];
+    // Dot product
+    double dot(const(Vector!N) other) const {
+        static if (N > 0) {
+            static if (N == 2 && is(double2)) {
+                auto prod = _components * other._components;
+                return prod[0] + prod[1];
+            } else static if (N == 3 && is(double4)) {
+                auto prod = _components * other._components;
+                return prod[0] + prod[1] + prod[2];
+            } else {
+                double sum = 0;
+                foreach (i; 0..N) {
+                    sum += _components[i] * other._components[i];
+                }
+                return sum;
+            }
         } else {
+            assert(_dimension == other._dimension, "Dimension mismatch");
             double sum = 0;
-            foreach (i; 0..N) {
-                sum += components[i] * other.components[i];
+            foreach (i; 0.._dimension) {
+                sum += _components[i] * other._components[i];
             }
             return sum;
         }
     }
     
-    // Magnitude squared with SIMD support
+    // Magnitude squared
     double magnitudeSquared() const {
-        return dot(this);  // Reuse existing dot product implementation
+        return dot(this);
     }
     
     // Magnitude
     double magnitude() const {
-        return sqrt(dot(this));
+        return sqrt(magnitudeSquared());
     }
     
     // Unit vector
@@ -219,8 +266,69 @@ struct Vector(size_t N) if (N >= 1 && N <= 3) {
         if (mag > 0) {
             return this * (1.0 / mag);
         } else {
-            return Vector!N.zero();
+            static if (N > 0) {
+                return Vector!N.zero();
+            } else {
+                return Vector!N.zero(_dimension);
+            }
         }
+    }
+    
+    // Equality comparison
+    bool opEquals(const Vector!N other) const {
+        static if (N > 0) {
+            static if (N == 2 && is(double2)) {
+                return _components[0] == other._components[0] && 
+                       _components[1] == other._components[1];
+            } else static if (N == 3 && is(double4)) {
+                return _components[0] == other._components[0] && 
+                       _components[1] == other._components[1] && 
+                       _components[2] == other._components[2];
+            } else {
+                foreach (i; 0..N) {
+                    if (_components[i] != other._components[i]) return false;
+                }
+                return true;
+            }
+        } else {
+            if (_dimension != other._dimension) return false;
+            foreach (i; 0.._dimension) {
+                if (_components[i] != other._components[i]) return false;
+            }
+            return true;
+        }
+    }
+    
+    // Safe iteration over components
+    int opApply(int delegate(size_t i, ref double value) dg) {
+        static if (N > 0) {
+            foreach (i; 0..N) {
+                if (auto result = dg(i, _components[i]))
+                    return result;
+            }
+        } else {
+            foreach (i; 0.._dimension) {
+                if (auto result = dg(i, _components[i]))
+                    return result;
+            }
+        }
+        return 0;
+    }
+    
+    // Const iteration over components
+    int opApply(int delegate(size_t i, const ref double value) dg) const {
+        static if (N > 0) {
+            foreach (i; 0..N) {
+                if (auto result = dg(i, _components[i]))
+                    return result;
+            }
+        } else {
+            foreach (i; 0.._dimension) {
+                if (auto result = dg(i, _components[i]))
+                    return result;
+            }
+        }
+        return 0;
     }
 }
 
@@ -228,6 +336,7 @@ struct Vector(size_t N) if (N >= 1 && N <= 3) {
 alias Vector1D = Vector!1;
 alias Vector2D = Vector!2;
 alias Vector3D = Vector!3;
+alias DynamicVector = Vector!0;
 
 // Unit tests
 unittest {
@@ -249,26 +358,28 @@ unittest {
     auto unit = v3.unit();
     assert(abs(unit.magnitude() - 1.0) < 1e-10);
     
-    // Test scalar multiplication
-    auto v = Vector2D(2.0, 3.0);
-    auto scaled = v * 2.0;
-    assert(scaled[0] == 4.0);
-    assert(scaled[1] == 6.0);
+    // Test dynamic vector
+    auto dv1 = DynamicVector([1.0, 2.0, 3.0]);
+    auto dv2 = DynamicVector([4.0, 5.0, 6.0]);
+    assert(dv1.dimension == 3);
+    assert(dv1.dot(dv2) == 32.0);
     
-    // Test dot product
-    auto v4 = Vector2D(1.0, 2.0);
-    auto v5 = Vector2D(3.0, 4.0);
-    assert(v4.dot(v5) == 11.0);
+    // Test scalar operations
+    auto scaled = dv1 * 2.0;
+    assert(scaled[0] == 2.0);
+    assert(scaled[1] == 4.0);
+    assert(scaled[2] == 6.0);
     
-    // Test scalar division
-    auto v6 = Vector2D(4.0, 6.0);
-    auto divided = v6 / 2.0;
-    assert(divided[0] == 2.0);
-    assert(divided[1] == 3.0);
+    // Test vector operations
+    auto sum = dv1 + dv2;
+    assert(sum[0] == 5.0);
+    assert(sum[1] == 7.0);
+    assert(sum[2] == 9.0);
     
-    // Test negation
-    auto v7 = Vector2D(1.0, -2.0);
-    auto negated = -v7;
-    assert(negated[0] == -1.0);
-    assert(negated[1] == 2.0);
+    // Test iteration
+    double sumComponents = 0;
+    foreach (i, value; dv1) {
+        sumComponents += value;
+    }
+    assert(sumComponents == 6.0);
 }

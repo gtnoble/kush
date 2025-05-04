@@ -1,22 +1,45 @@
 module io.simulation_loader;
 
+import core.optimization : OptimizationSolver;
+import core.material_point : isMaterialPoint;
 import std.json;
 import std.stdio;
 import std.exception : enforce;
 import std.format : format;
 import std.file : readText;
 
-/// Parameters for the gradient descent optimizer
+/// Parameters for optimization
 struct OptimizationConfig {
     double tolerance = 1e-6;
     int max_iterations = 10;
+    string solver_type = "gradient_descent";  // "gradient_descent" or "parallel_tempering"
+
+    // Gradient descent specific settings
     double momentum = 0.1;
+    string gradient_mode = "step_size";  // "step_size" or "learning_rate"
+    double learning_rate = 0.01;
     
     struct GradientStepSize {
         double value = 1e-4;
         double horizon_fraction;  // Optional: if specified, step = horizon * fraction
     }
     GradientStepSize gradient_step_size;
+
+    size_t getNumReplicas() const {
+        import std.parallelism : totalCPUs;
+        if (solver_type != "parallel_tempering") return 0;
+        if (parallel_tempering.num_replicas > 0) 
+            return parallel_tempering.num_replicas;
+        return totalCPUs;
+    }
+
+    // Parallel tempering specific settings
+    struct ParallelTempering {
+        size_t num_replicas;  // Defaults to totalCPUs if not specified
+        double min_temperature = 0.1;
+        double max_temperature = 2.0;
+    }
+    ParallelTempering parallel_tempering;
     
     /// Calculate the effective gradient step size
     double getEffectiveStepSize(double horizon) const {
@@ -84,6 +107,14 @@ struct SimulationConfig {
 private OptimizationConfig parseOptimizationConfig(JSONValue json) {
     OptimizationConfig config;
     
+    // Parse solver type
+    if ("solver_type" in json) {
+        config.solver_type = json["solver_type"].get!string;
+        enforce(config.solver_type == "gradient_descent" || 
+               config.solver_type == "parallel_tempering",
+            "Solver type must be 'gradient_descent' or 'parallel_tempering'");
+    }
+    
     // Parse tolerance
     if ("tolerance" in json) {
         config.tolerance = json["tolerance"].get!double;
@@ -103,7 +134,42 @@ private OptimizationConfig parseOptimizationConfig(JSONValue json) {
             "Momentum must be in range [0, 1)");
     }
     
-    // Parse gradient step size
+    if ("parallel_tempering" in json) {
+        auto pt = json["parallel_tempering"];
+        
+        if ("num_replicas" in pt) {
+            config.parallel_tempering.num_replicas = pt["num_replicas"].get!size_t;
+            enforce(config.parallel_tempering.num_replicas > 1,
+                "Number of replicas must be greater than 1");
+        }
+        
+        if ("min_temperature" in pt) {
+            config.parallel_tempering.min_temperature = pt["min_temperature"].get!double;
+            enforce(config.parallel_tempering.min_temperature > 0.0,
+                "Minimum temperature must be positive");
+        }
+        
+        if ("max_temperature" in pt) {
+            config.parallel_tempering.max_temperature = pt["max_temperature"].get!double;
+            enforce(config.parallel_tempering.max_temperature > 
+                   config.parallel_tempering.min_temperature,
+                "Maximum temperature must be greater than minimum temperature");
+        }
+    }
+
+    // Parse learning rate
+    if ("learning_rate" in json) {
+        config.learning_rate = json["learning_rate"].get!double;
+        enforce(config.learning_rate > 0.0, "Learning rate must be positive");
+    }
+
+    // Parse gradient mode
+    if ("gradient_mode" in json) {
+        config.gradient_mode = json["gradient_mode"].get!string;
+        enforce(config.gradient_mode == "step_size" || config.gradient_mode == "learning_rate",
+            "Gradient mode must be either 'step_size' or 'learning_rate'");
+    }
+    
     if ("gradient_step_size" in json) {
         auto step = json["gradient_step_size"];
         if ("value" in step) {
@@ -122,6 +188,25 @@ private OptimizationConfig parseOptimizationConfig(JSONValue json) {
     return config;
 }
 
+// Create an optimizer from the configuration
+OptimizationSolver!(T, V) createOptimizer(T, V)(
+    const OptimizationConfig config, double horizon
+) if (isMaterialPoint!(T, V)) {
+    import core.optimization : createOptimizer;
+
+    return .createOptimizer!(T, V)(
+        config.tolerance,
+        config.max_iterations,
+        config.solver_type,
+        config.learning_rate,
+        config.getEffectiveStepSize(horizon),
+        config.momentum,
+        config.gradient_mode,
+        config.getNumReplicas(),
+        config.parallel_tempering.min_temperature,
+        config.parallel_tempering.max_temperature
+    );
+}
 /// Parse time stepping configuration from JSON
 private TimeSteppingConfig parseTimeSteppingConfig(JSONValue json) {
     TimeSteppingConfig config;

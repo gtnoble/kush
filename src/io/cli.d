@@ -11,7 +11,8 @@ import std.format : format;
 import math.vector;
 
 // Core imports
-import core.integration : GradientDescentSolver, GradientUpdateMode, LagrangianIntegrator;
+import core.optimization : GradientDescentSolver, GradientUpdateMode;
+import core.integration : LagrangianIntegrator;
 import core.damper : StandardDamper;
 import core.material_body : MaterialBody;
 import core.simulation : simulate, AdaptiveTimeStep;
@@ -114,7 +115,7 @@ private:
         // Load configurations
         auto materials = loadMaterialConfigs!V(options.materials_file);
         auto simConfig = loadSimulationConfig(options.simulation_file);
-        auto pointConfigs = loadPointConfigs!V(options.points_file);
+        auto pointConfigs = loadPointConfigs!V(options.points_file, materials);  // Now updates point counts
         
         // Create points
         BondBasedPoint!V[] bondedPoints;
@@ -129,6 +130,15 @@ private:
                 simConfig.damping.viscosity_time_constant
             );
             
+            // Get scaled force from material config
+            V scaledForce = V.zero();
+            foreach (group; pointConfig.material_groups) {
+                if (materials.getMaterial(group).force != V.zero()) {
+                    scaledForce = materials.getScaledForce(group);
+                    break;  // Use first non-zero force found
+                }
+            }
+
             // Create point (properties come from merged material)
             bondedPoints ~= new BondBasedPoint!V(
                 pointConfig.position,
@@ -138,7 +148,7 @@ private:
                 damper,
                 material.velocity,
                 material.fixed_velocity,
-                material.force,
+                scaledForce,
                 material.ramp_duration
             );
         }
@@ -151,11 +161,13 @@ private:
         
         // Create solver
         auto solver = new GradientDescentSolver!(BondBasedPoint!V, V)(
-            simConfig.optimization.tolerance,
-            simConfig.optimization.max_iterations,
-            simConfig.optimization.getEffectiveStepSize(simConfig.horizon),
-            simConfig.optimization.momentum,  // Move momentum before update mode
-            GradientUpdateMode.StepSize
+            simConfig.optimization.tolerance,           // tolerance
+            simConfig.optimization.max_iterations,      // maxIterations
+            simConfig.optimization.learning_rate,       // learningRate
+            simConfig.optimization.getEffectiveStepSize(simConfig.horizon),  // stepSize
+            simConfig.optimization.gradient_mode == "learning_rate" ?        // mode
+                GradientUpdateMode.LearningRate : GradientUpdateMode.StepSize,
+            simConfig.optimization.momentum             // momentum
         );
         
         // Create time step strategy

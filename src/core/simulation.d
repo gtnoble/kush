@@ -117,11 +117,11 @@ class AdaptiveTimeStep(T, V) : TimeStepStrategy!(T, V) {
     }
 }
 
-// Generic simulation function with adaptive time stepping and output control
+// Generic simulation function with adaptive time stepping and Lagrangian integration
 void simulate(T, V)(
     MaterialBody!(T, V) body,
     TimeStepStrategy!(T, V) timeStepStrategy,
-    IntegrationStrategy!(T, V) integrator,
+    LagrangianIntegrator!(T, V) integrator,
     double totalTime,
     OutputConfig output
 ) if (isMaterialPoint!(T, V)) {

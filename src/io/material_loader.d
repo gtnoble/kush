@@ -8,6 +8,7 @@ import std.exception : enforce;
 import std.array;
 import std.format : format;
 import std.algorithm : map, filter, minElement;
+import std.conv : to;
 import math.vector;
 
 /// Material properties loaded from JSON
@@ -45,6 +46,7 @@ struct MaterialConfig(V) {
 /// Contains all material configurations indexed by name
 struct MaterialsConfig(V) {
     MaterialConfig!V[string] materials;
+    size_t[string] pointCounts;  // Track number of points per material group
     
     /// Calculate the minimum wave speed across all materials
     double calculateMinWaveSpeed() const {
@@ -64,6 +66,24 @@ struct MaterialsConfig(V) {
     ref const(MaterialConfig!V) getMaterial(string name) const {
         enforce(name in materials, "Material group not found: " ~ name);
         return materials[name];
+    }
+
+    /// Get scaled force for a material group
+    V getScaledForce(string name) const {
+        enforce(name in materials, "Material group not found: " ~ name);
+        enforce(name in pointCounts, "Point count not found for material group: " ~ name);
+        enforce(pointCounts[name] > 0, "Material group has no points: " ~ name);
+
+        // Scale force by number of points in the group
+        return materials[name].force / pointCounts[name].to!double;
+    }
+
+    /// Update point count for a material group
+    void incrementPointCount(string name) {
+        if (name !in pointCounts) {
+            pointCounts[name] = 0;
+        }
+        pointCounts[name]++;
     }
 
     /// Merge properties from multiple material groups in sequence
