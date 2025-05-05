@@ -3,14 +3,14 @@
     "aluminum_base": {
       "density": 2700.0,
       "youngsModulus": 70e9,
-      "criticalStretch": 10
+      "criticalStretch": 0.1
     },
     "fixed_boundary": {
       "fixed_velocity": true
     },
     "loaded_edge": {
-      "force": [0.0, 100.0],
-      "ramp_duration": 1e-6
+      "velocity": [1.0, 0.0],
+      "fixed_velocity": true
     }
   }
 }

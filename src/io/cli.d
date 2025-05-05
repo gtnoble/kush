@@ -11,26 +11,27 @@ import std.format : format;
 import math.vector;
 
 // Core imports
-import core.optimization : GradientDescentSolver, GradientUpdateMode;
 import core.integration : LagrangianIntegrator;
 import core.damper : StandardDamper;
 import core.material_body : MaterialBody;
 import core.simulation : simulate, AdaptiveTimeStep;
+import core.optimization : createOptimizer;
 
 // Model imports
 import models.bond_based_point : BondBasedPoint;
 
 // IO imports
 import io.point_loader;
+import std.sumtype;
 import io.material_loader;
 import io.simulation_loader;
 
 /// Parsed command line arguments
 struct CLIOptions {
-    int dimension;           // Simulation dimension (1, 2, or 3)
     string points_file;      // Path to points configuration (JSONL)
     string materials_file;   // Path to materials configuration (JSON)
     string simulation_file;  // Path to simulation configuration (JSON)
+    string output_dir;       // Output directory for simulation results
 }
 
 /// Help text for command line options
@@ -38,10 +39,10 @@ private enum helpText =
     "Usage: peridynamics [options]\n" ~
     "Run a peridynamics simulation using configuration files.\n\n" ~
     "Options:\n" ~
-    "  -d, --dimension <dim>     Dimension of the simulation (1, 2, or 3)\n" ~
     "  -p, --points <file>       Points configuration file (JSONL)\n" ~
     "  -m, --materials <file>    Materials configuration file (JSON)\n" ~
     "  -s, --simulation <file>   Simulation configuration file (JSON)\n" ~
+    "  -o, --output-dir <dir>    Output directory for simulation results\n" ~
     "  -h, --help               Display this help message";
 
 /// Parse command line arguments
@@ -51,10 +52,10 @@ CLIOptions parseCommandLine(string[] args) {
     
     try {
         auto helpInfo = getopt(args,
-            "dimension|d", "Simulation dimension (1, 2, or 3)", &options.dimension,
             "points|p", "Points configuration file (JSONL)", &options.points_file,
             "materials|m", "Materials configuration file (JSON)", &options.materials_file,
             "simulation|s", "Simulation configuration file (JSON)", &options.simulation_file,
+            "output-dir|o", "Output directory for simulation results", &options.output_dir,
             "help|h", "Display this help message", &help
         );
         
@@ -65,8 +66,6 @@ CLIOptions parseCommandLine(string[] args) {
         }
         
         // Validate required arguments
-        enforce(options.dimension > 0 && options.dimension <= 3,
-            "Dimension must be 1, 2, or 3");
         enforce(options.points_file,
             "Points file (-p, --points) is required");
         enforce(options.materials_file,
@@ -88,40 +87,44 @@ CLIOptions parseCommandLine(string[] args) {
 struct SimulationRunner {
     CLIOptions options;
 
-    /// Run simulation with appropriate vector type based on dimension
+    /// Run simulation
     void run() {
-        final switch (options.dimension) {
-            case 1:
-                runDimensional!Vector1D();
-                break;
-            case 2:
-                runDimensional!Vector2D();
-                break;
-            case 3:
-                runDimensional!Vector3D();
-                break;
-        }
+        import io.point_loader : loadPointConfigsWithDimension, DimensionalPoints;
+        
+        // Get points and detect dimension
+        auto loadedData = loadPointConfigsWithDimension(
+            options.points_file,
+            options.materials_file
+        );
+        
+        // Match on dimension and run appropriate simulation
+        loadedData.match!(
+            (LoadedPoints!Vector1D p) => runWithPoints(p),
+            (LoadedPoints!Vector2D p) => runWithPoints(p),
+            (LoadedPoints!Vector3D p) => runWithPoints(p)
+        );
     }
 
 private:
-    /// Run simulation with specific vector type
-    void runDimensional(V)() {
+    /// Process loaded points of any dimension
+    private void runWithPoints(V)(LoadedPoints!V loadedData) {
         
         writefln("Running %dD simulation...", V.dimension);
         writefln("- Points: %s", options.points_file);
         writefln("- Materials: %s", options.materials_file);
         writefln("- Simulation: %s", options.simulation_file);
+        if (options.output_dir) {
+            writefln("- Output directory: %s", options.output_dir);
+        }
         
-        // Load configurations
-        auto materials = loadMaterialConfigs!V(options.materials_file);
+        // Load simulation config
         auto simConfig = loadSimulationConfig(options.simulation_file);
-        auto pointConfigs = loadPointConfigs!V(options.points_file, materials);  // Now updates point counts
         
         // Create points
         BondBasedPoint!V[] bondedPoints;
-        foreach (pointConfig; pointConfigs) {
+        foreach (point; loadedData.points) {
             // Get material properties by merging groups
-            auto material = materials.mergeGroups(pointConfig.material_groups);
+            auto material = loadedData.materials.mergeGroups(point.material_groups);
             
             // Create damper
             auto damper = new StandardDamper!V(
@@ -132,17 +135,17 @@ private:
             
             // Get scaled force from material config
             V scaledForce = V.zero();
-            foreach (group; pointConfig.material_groups) {
-                if (materials.getMaterial(group).force != V.zero()) {
-                    scaledForce = materials.getScaledForce(group);
+            foreach (group; point.material_groups) {
+                if (loadedData.materials.getMaterial(group).force != V.zero()) {
+                    scaledForce = loadedData.materials.getScaledForce(group);
                     break;  // Use first non-zero force found
                 }
             }
 
             // Create point (properties come from merged material)
             bondedPoints ~= new BondBasedPoint!V(
-                pointConfig.position,
-                calculateMass!V(material.density, pointConfig.volume),
+                point.position,
+                calculateMass!V(material.density, point.volume),
                 calculateBondStiffness!V(material.youngsModulus, simConfig.horizon),
                 material.criticalStretch,
                 damper,
@@ -157,17 +160,12 @@ private:
         auto body = new MaterialBody!(BondBasedPoint!V, V)(bondedPoints, simConfig.horizon);
         
         // Get material wave speed for time stepping
-        double minWaveSpeed = materials.calculateMinWaveSpeed();
+        double minWaveSpeed = loadedData.materials.calculateMinWaveSpeed();
         
-        // Create solver
-        auto solver = new GradientDescentSolver!(BondBasedPoint!V, V)(
-            simConfig.optimization.tolerance,           // tolerance
-            simConfig.optimization.max_iterations,      // maxIterations
-            simConfig.optimization.learning_rate,       // learningRate
-            simConfig.optimization.getEffectiveStepSize(simConfig.horizon),  // stepSize
-            simConfig.optimization.gradient_mode == "learning_rate" ?        // mode
-                GradientUpdateMode.LearningRate : GradientUpdateMode.StepSize,
-            simConfig.optimization.momentum             // momentum
+        // Create solver using core optimizer factory
+        auto solver = createOptimizer!(BondBasedPoint!V, V)(
+            simConfig.optimization,
+            simConfig.horizon
         );
         
         // Create time step strategy
@@ -183,6 +181,19 @@ private:
         
         // Configure integrator
         auto integrator = new LagrangianIntegrator!(BondBasedPoint!V, V)(solver);
+
+        // Create output directory if specified
+        if (options.output_dir) {
+            import std.file : exists, mkdirRecurse;
+            import std.path : buildPath;
+            
+            if (!exists(options.output_dir)) {
+                mkdirRecurse(options.output_dir);
+            }
+            
+            // Update output paths with output directory
+            simConfig.output.csv_file = buildPath(options.output_dir, simConfig.output.csv_file);
+        }
 
         // Run simulation
         simulate(

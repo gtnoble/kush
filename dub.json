@@ -13,11 +13,13 @@
         },
         "release": {
             "buildOptions": ["releaseMode", "optimize", "inline"]
+        },
+        "release-native": {
+            "buildOptions": ["releaseMode", "optimize", "inline", "noBoundsCheck"],
+            "dflags-gdc": [
+                "-march=native",
+                "-O3"
+            ]
         }
-    },
-    "dflags-gdc": [
-        "-march=native",
-        "-mavx",
-        "-msse2"
-    ]
+    }
 }

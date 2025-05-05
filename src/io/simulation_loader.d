@@ -188,25 +188,6 @@ private OptimizationConfig parseOptimizationConfig(JSONValue json) {
     return config;
 }
 
-// Create an optimizer from the configuration
-OptimizationSolver!(T, V) createOptimizer(T, V)(
-    const OptimizationConfig config, double horizon
-) if (isMaterialPoint!(T, V)) {
-    import core.optimization : createOptimizer;
-
-    return .createOptimizer!(T, V)(
-        config.tolerance,
-        config.max_iterations,
-        config.solver_type,
-        config.learning_rate,
-        config.getEffectiveStepSize(horizon),
-        config.momentum,
-        config.gradient_mode,
-        config.getNumReplicas(),
-        config.parallel_tempering.min_temperature,
-        config.parallel_tempering.max_temperature
-    );
-}
 /// Parse time stepping configuration from JSON
 private TimeSteppingConfig parseTimeSteppingConfig(JSONValue json) {
     TimeSteppingConfig config;

@@ -126,7 +126,7 @@ void simulate(T, V)(
     OutputConfig output
 ) if (isMaterialPoint!(T, V)) {
     import std.stdio : writefln;
-    import std.path : stripExtension, baseName;
+    import std.path : stripExtension, baseName, dirName, buildPath;
     import std.file : copy;
     
     size_t step = 0;
@@ -135,8 +135,14 @@ void simulate(T, V)(
     double nextOutputTime = 0.0;
     string lastOutputFile;
     
-    // Get base filename without extension
+    // Get base filename and directory
+    string outputDir = dirName(output.csv_file);
     string baseFile = stripExtension(baseName(output.csv_file));
+    
+    // Ensure intermediate files go to the same directory as final output
+    string getOutputPath(string filename) {
+        return buildPath(outputDir, filename);
+    }
     
     // Main time stepping loop
     while (currentTime < totalTime) {
@@ -160,13 +166,13 @@ void simulate(T, V)(
         
         if (output.step_interval > 0 && step % output.step_interval == 0) {
             // Step-based output
-            currentOutputFile = format("%s_step%05d.csv", baseFile, step);
+            currentOutputFile = getOutputPath(format("%s_step%05d.csv", baseFile, step));
             shouldOutput = true;
         }
         else if (output.time_interval > 0 && currentTime >= nextOutputTime) {
             // Time-based output
-            currentOutputFile = format("%s_t%09d.csv", baseFile, 
-                cast(size_t)(currentTime * 1e9));
+            currentOutputFile = getOutputPath(format("%s_t%09d.csv", baseFile, 
+                cast(size_t)(currentTime * 1e9)));
             shouldOutput = true;
             nextOutputTime += output.time_interval;
         }

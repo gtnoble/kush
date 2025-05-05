@@ -37,11 +37,7 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
     }
     @property V referencePosition() const { return _referencePosition; }
     @property V velocity() const { return _velocity; }
-    @property void velocity(V vel) {
-        if (!_isVelocityFixed) {
-            _velocity = vel;
-        }
-    }
+    @property void velocity(V vel) { _velocity = vel; }
     @property void position(V newPos) { _position = newPos; }
     @property double mass() const { return _mass; }
     
