@@ -3,6 +3,9 @@ module core.optimization;
 import core.material_point;
 import math.vector;
 import std.math : abs, sqrt, exp;
+import std.algorithm.comparison : min;
+import core.thread : Thread;
+import core.time : dur;
 import std.array;
 import std.random : uniform01;
 import std.mathspecial : normalDistributionInverse;
@@ -12,29 +15,24 @@ import core.sys.posix.signal :
     kill, sigaction, sigaction_t,
     SIGTERM, SIGABRT, SIGINT, SA_RESTART;
 import core.sys.posix.sys.wait : wait, WIFEXITED, WIFSIGNALED, WEXITSTATUS, WTERMSIG;
-import core.sys.posix.mqueue;  // POSIX message queues
-import core.sys.posix.fcntl : O_CREAT, O_RDWR, S_IRUSR, S_IWUSR;
 import core.stdc.stdlib : exit;
 import std.conv : to;
-import std.file : readText;
-import std.string : strip;
-import core.sys.posix.sys.types : ssize_t;
 import std.format : format;
 import core.stdc.errno;
 import core.stdc.string : strerror;
 import std.parallelism : totalCPUs;
 import std.process : thisProcessID;
-import std.string : toStringz, fromStringz;
-import std.socket : Socket, AddressFamily, SocketType, UnixAddress;
+import std.string : fromStringz;
+import std.socket : Socket, SocketOptionLevel, SocketOption, AddressFamily, SocketType, UnixAddress;
 import std.uuid : randomUUID;
 import std.file : remove;
-import core.stdc.stdio : snprintf;
+import core.sys.posix.poll : poll, pollfd, POLLIN;
+
 
 // Helper for normal distribution sampling
 private double normal(double mean, double stddev) {
     return mean + stddev * normalDistributionInverse(uniform01());
 }
-
 
 /**
  * Process manager for handling worker processes.
@@ -51,434 +49,220 @@ class ProcessManager {
             _pids = new pid_t[numProcesses];
         }
         
-        extern(C) static void signalHandler(int sig) nothrow @nogc {
-            import core.sys.posix.unistd : write, STDERR_FILENO;
-            import core.stdc.string : strlen;
-
-            const(char)* msg = "Process terminated by signal\n";
-            write(STDERR_FILENO, msg, strlen(msg));
-            exit(0);
-        }
-
         void spawnWorkers(void delegate(size_t) worker) {
-            // Set up signal handler for children
-            import core.sys.posix.signal : sigaction_t, SA_RESTART, SIGTERM, SIGABRT, SIGINT;
-            sigaction_t action;
-            action.sa_handler = cast(void function(int))&signalHandler;
-            action.sa_flags = SA_RESTART;  // Restart interrupted system calls
-
-            // Install signal handlers
-            import core.sys.posix.signal : sigaction;
-            if (sigaction(SIGTERM, &action, null) == -1 ||
-                sigaction(SIGABRT, &action, null) == -1 ||
-                sigaction(SIGINT, &action, null) == -1) {
-                throw new Exception("Failed to install signal handlers");
-            }
-
             foreach (i; 0.._numProcesses) {
                 _pids[i] = fork();
                 if (_pids[i] == 0) {  // Child process
-                    writeln("Child process ", i, " (PID ", thisProcessID(), ") starting");
                     try {
                         worker(i);
                     } catch (Exception e) {
                         stderr.writeln("Child process ", i, " error: ", e.msg);
                     }
-                    writeln("Child process ", i, " (PID ", thisProcessID(), ") exiting");
-                    exit(0);  // Exit child process
-                }
-                
-                writeln("Parent started child ", i, " with PID ", _pids[i]);
-                stdout.flush();
-            }
-        }
-        
-        void sendSignalToAll(int signal) {
-            foreach (pid; _pids) {
-                if (pid != 0) {
-                    kill(pid, signal);
+                    exit(0);
                 }
             }
         }
         
         void cleanupProcesses() {
-            writeln("Starting cleanup process...");
-            stdout.flush();
-            
-            // First, log active PIDs
-            writeln("Active PIDs: ", _pids);
-            stdout.flush();
-            
-            // Send SIGTERM to all replicas
-            writeln("Sending SIGTERM to all processes...");
-            sendSignalToAll(SIGTERM);
-            stdout.flush();
-            
-            foreach (i, pid; _pids) {
+            // Send SIGTERM to all workers
+            foreach (pid; _pids) {
                 if (pid != 0) {
-                    writefln("Waiting for process %d (index %d)...", pid, i);
-                    stdout.flush();
-                    
-                    int status;
-                    auto result = wait(&status);
-                    
-                    if (result == -1) {
-                        stderr.writefln("Failed to wait for process %d: %s (errno: %d)", 
-                            pid, fromStringz(strerror(errno)), errno);
-                        stderr.flush();
-                    } else if (result != pid) {
-                        stderr.writefln("Wait returned for wrong process. Expected %d, got %d",
-                            pid, result);
-                        stderr.flush();
-                    } else if (WIFEXITED(status)) {
-                        auto exitStatus = WEXITSTATUS(status);
-                        writefln("Process %d exited with status %d", pid, exitStatus);
-                        if (exitStatus != 0) {
-                            stderr.writefln("WARNING: Process %d had non-zero exit status %d", 
-                                pid, exitStatus);
-                        }
-                    } else if (WIFSIGNALED(status)) {
-                        auto signal = WTERMSIG(status);
-                        stderr.writefln("Process %d terminated by signal %d", pid, signal);
-                    } else {
-                        stderr.writefln("Process %d exited abnormally (status: %d)", pid, status);
-                    }
-                    stdout.flush();
-                    stderr.flush();
+                    kill(pid, SIGTERM);
+                    wait(null);  // Wait for each process to exit
                 }
             }
-            
-            writeln("Cleanup process complete.");
-            stdout.flush();
         }
-}
-
-// Message types for parallel tempering communication
-enum ControlMessageType {
-    TEMPERATURE_ASSIGNMENT  // No more terminate message - using signals instead
-}
-
-// Parent -> Replica control message
-struct ControlMessage(V) {
-    ControlMessageType type;
-    double temperature;
-    size_t replicaId;  // Target replica
-
-    void serialize(ref ubyte[] buffer) const {
-        buffer = new ubyte[this.sizeof];
-        (cast(ControlMessage!V*)buffer.ptr)[0] = this;
-    }
-
-    static ControlMessage!V deserialize(const(ubyte)[] buffer) {
-        return *(cast(const(ControlMessage!V)*)buffer.ptr);
-    }
-}
-
-// Replica -> Parent state message
-struct StateMessage(V) {
-    size_t replicaId;
-    double energy;
-    double multiplier;
-    V[] positions;
-
-    void serialize(ref ubyte[] buffer) {
-        // Calculate total size needed
-        size_t totalSize = 
-            size_t.sizeof +      // replicaId
-            double.sizeof * 2 +  // energy + multiplier
-            V.sizeof * positions.length + // positions array
-            size_t.sizeof;       // position array length
-
-        buffer = new ubyte[totalSize];
-        size_t offset = 0;
-
-        // Write fields
-        (cast(size_t*)(buffer.ptr + offset))[0] = replicaId;
-        offset += size_t.sizeof;
-        
-        (cast(double*)(buffer.ptr + offset))[0] = energy;
-        offset += double.sizeof;
-        
-        (cast(double*)(buffer.ptr + offset))[0] = multiplier;
-        offset += double.sizeof;
-
-        // Write positions array length
-        (cast(size_t*)(buffer.ptr + offset))[0] = positions.length;
-        offset += size_t.sizeof;
-        
-        // Write positions array
-        V* posPtr = cast(V*)(buffer.ptr + offset);
-        posPtr[0..positions.length] = positions[];
-    }
-
-    static StateMessage!V deserialize(const(ubyte)[] buffer) {
-        StateMessage!V msg;
-        size_t offset = 0;
-
-        // Read fields
-        msg.replicaId = (cast(size_t*)(buffer.ptr + offset))[0];
-        offset += size_t.sizeof;
-        
-        msg.energy = (cast(double*)(buffer.ptr + offset))[0];
-        offset += double.sizeof;
-        
-        msg.multiplier = (cast(double*)(buffer.ptr + offset))[0];
-        offset += double.sizeof;
-
-        // Read positions array length
-        size_t numPositions = (cast(size_t*)(buffer.ptr + offset))[0];
-        offset += size_t.sizeof;
-        
-        // Read positions array
-        msg.positions = (cast(V*)(buffer.ptr + offset))[0..numPositions].dup;
-        
-        return msg;
-    }
 }
 
 /**
- * Message queue manager for parallel tempering communication.
- * Provides two queues:
- * 1. Control queue (parent -> replicas)
- * 2. Results queue (replicas -> parent)
+ * Socket manager for worker communication.
+ * Handles creation, connection, and cleanup of Unix domain sockets.
  */
-class MessageQueueManager(V) {
+// Worker jobs and state
+private struct ReplicaJob(V) {
+    size_t replicaId;           // Which replica this job is for
+    V[] proposedPositions;      // Proposed new positions
+    double proposedMultiplier;  // Proposed new multiplier
+    double temperature;         // Current temperature
+    double currentEnergy;       // Current energy for acceptance check
+}
+
+class WorkerSocketManager(V) {
     private:
-        mqd_t[] _controlQueues;  // Array of control queues (one per worker)
-        mqd_t _resultQueue;      // Workers -> Parent
-        size_t _msgSize;         // Size required for messages
-        size_t _numReplicas;     // Number of replicas/workers
+        Socket[] _serverSockets;    // Listening sockets
+        Socket[] _connections;      // Active connections
+        string[] _socketPaths;
+        size_t _numWorkers;
         bool _initialized;
-
-        // Static string and buffer configuration
-        static immutable QueuePrefix = "/pd_control_";
-        static immutable MaxQueueDigits = 20;  // Large enough for size_t.max
+        pollfd[] _pollFds;         // For poll-based monitoring
+        ReplicaJob!V[] _currentJobs;// Track current job per worker
+        ReplicaJob!V[] _pendingJobs;// Jobs waiting to be assigned
         
-        // Fixed-size buffers for paths with static lifetime
-        static immutable ResultPath = "/peridynamics_results\0";  // Null-terminated string literal
-        char[QueuePrefix.length + MaxQueueDigits + 1][] _controlQueuePaths;
-        
-        // Initialize queue paths with fixed-size buffers
-        void initializeQueuePaths() {
-            _controlQueuePaths = new char[QueuePrefix.length + MaxQueueDigits + 1][_numReplicas];
-            foreach (i; 0.._numReplicas) {
-                // Format directly into fixed buffer
-                auto path = _controlQueuePaths[i][];
-                auto len = snprintf(path.ptr, path.length, "%s%zu\0", QueuePrefix.ptr, i);
-                assert(len > 0 && len < path.length, "Queue path formatting failed");
-            }
-        }
-        
-        mq_attr getQueueAttributes(mqd_t queue) {
-            mq_attr attr;
-            if (mq_getattr(queue, &attr) == -1) {
-                throw new Exception(
-                    format("Failed to get queue attributes: %s", 
-                    fromStringz(strerror(errno)))
-                );
-            }
-            return attr;
-        }
-
-        void verifyMessageSize(size_t messageSize, mqd_t queue, string messageType) {
-            auto attr = getQueueAttributes(queue);
-            if (messageSize > attr.mq_msgsize) {
-                throw new Exception(
-                    format("%s message size (%d bytes) exceeds queue capacity (%d bytes)",
-                        messageType, messageSize, attr.mq_msgsize)
-                );
-            }
-        }
-
-        void calculateQueueAttributes(size_t numPositions) {
-            // Read system limits
-            auto maxMsgSize = readText("/proc/sys/fs/mqueue/msgsize_max").strip.to!size_t;
-            
-            // Calculate required size for state messages (larger than control messages)
-            _msgSize = size_t.sizeof * 2 +  // replicaId + array length
-                      double.sizeof * 2 +   // energy + multiplier
-                      V.sizeof * numPositions;  // positions array
-
-            if (_msgSize > maxMsgSize) {
-                throw new Exception(format(
-                    "Required message size (%d bytes) exceeds system limit (%d bytes). " ~
-                    "Increase msg_size_max in /proc/sys/fs/mqueue/msgsize_max",
-                    _msgSize, maxMsgSize
-                ));
-            }
-        }
-
     public:
-        this(size_t numPositions, size_t numReplicas) {
-            calculateQueueAttributes(numPositions);
-
-            // Configure queue attributes
-            mq_attr attr;
-            attr.mq_flags = 0;
-            attr.mq_msgsize = _msgSize;
-            attr.mq_maxmsg = totalCPUs * 2;  // Queue depth based on number of CPUs
-            attr.mq_curmsgs = 0;
-
-            // Initialize management fields
-            _numReplicas = numReplicas;
-            _controlQueues = new mqd_t[_numReplicas];
+        this(size_t numWorkers) {
+            _numWorkers = numWorkers;
+            _serverSockets = new Socket[numWorkers];
+            _connections = new Socket[numWorkers];
+            _socketPaths = new string[numWorkers];
+            _currentJobs = new ReplicaJob!V[numWorkers];
+            _pendingJobs = [];
+            _initialized = false;
+        }
+        
+        void initializeSockets() {
+            if (_initialized) return;
             
-            // Initialize C string paths
-            initializeQueuePaths();
-            
-            // Create control queues (one per worker)
-            foreach (i; 0.._numReplicas) {
-                _controlQueues[i] = mq_open(
-                    _controlQueuePaths[i].ptr,
-                    O_CREAT | O_RDWR,
-                    S_IRUSR | S_IWUSR,
-                    &attr
-                );
+            foreach (i; 0.._numWorkers) {
+                // Create unique socket path
+                _socketPaths[i] = format("/tmp/pd_worker_%d_%s_%d",
+                    thisProcessID(),
+                    randomUUID().toString()[0..8],
+                    i);
                 
-                if (_controlQueues[i] == cast(mqd_t)-1) {
-                    throw new Exception(format("Failed to create control queue for worker %d: %s",
-                        i, fromStringz(strerror(errno))));
-                }
+                // Create and bind socket
+                _serverSockets[i] = new Socket(AddressFamily.UNIX, SocketType.STREAM);
+                _serverSockets[i].bind(new UnixAddress(_socketPaths[i]));
+                _serverSockets[i].listen(1);
             }
             
-            // Create shared result queue
-            _resultQueue = mq_open(
-                ResultPath.ptr,
-                O_CREAT | O_RDWR,
-                S_IRUSR | S_IWUSR,
-                &attr
-            );
-            
-            if (_resultQueue == cast(mqd_t)-1) {
-                // Calculate control message size
-                ControlMessage!V tempCtrl;
-                ubyte[] tempBuffer;
-                tempCtrl.serialize(tempBuffer);
-                size_t controlMsgSize = tempBuffer.length;
-
-                string errorDetails = format(
-                    "Failed to create message queues.\n" ~
-                    "Error: %s\n" ~
-                    "Requested configuration:\n" ~
-                    "  Control message size: %d bytes\n" ~
-                    "  State message size: %d bytes\n" ~
-                    "  Queue depth: %d messages\n" ~
-                    "Current system limits:\n" ~
-                    "  msg_max: %s\n" ~
-                    "  msgsize_max: %s\n" ~
-                    "  queues_max: %s\n" ~
-                    "\nPossible solutions:\n" ~
-                    "1. Clean up stale queues: rm -f /dev/mqueue/peridynamics_*\n" ~
-                    "2. Check queue directory permissions: ls -l /dev/mqueue\n" ~
-                    "3. Increase system limits (as root):\n" ~
-                    "   echo 8192 > /proc/sys/fs/mqueue/msgsize_max\n" ~
-                    "   echo 10 > /proc/sys/fs/mqueue/msg_max\n" ~
-                    "   echo 256 > /proc/sys/fs/mqueue/queues_max",
-                    fromStringz(strerror(errno)),
-                    controlMsgSize,
-                    _msgSize,
-                    totalCPUs * 2,
-                    readText("/proc/sys/fs/mqueue/msg_max").strip,
-                    readText("/proc/sys/fs/mqueue/msgsize_max").strip,
-                    readText("/proc/sys/fs/mqueue/queues_max").strip
-                );
-                
-                throw new Exception(errorDetails);
-            }
-
             _initialized = true;
         }
-
+        
+        void acceptConnections() {
+            import std.datetime: dur, Duration;
+            
+            foreach (i; 0.._numWorkers) {
+                // Set accept timeout
+                _serverSockets[i].setOption(SocketOptionLevel.SOCKET,
+                                          SocketOption.RCVTIMEO,
+                                          dur!"seconds"(5));
+                                          
+                // Accept connection
+                try {
+                    _connections[i] = _serverSockets[i].accept();
+                } catch (Exception e) {
+                    throw new Exception(format(
+                        "Worker %d failed to connect within timeout: %s", 
+                        i, e.msg));
+                }
+                
+                // Close server socket, no longer needed
+                _serverSockets[i].close();
+                _serverSockets[i] = null;
+            }
+            
+            import core.sys.posix.poll : POLLIN, POLLOUT;
+            
+            // Initialize poll structures
+            _pollFds = new pollfd[_connections.length];
+            foreach (i; 0.._connections.length) {
+                _pollFds[i] = pollfd(
+                    _connections[i].handle,  // fd
+                    POLLIN | POLLOUT,       // events to monitor (read and write)
+                    0                        // returned events
+                );
+            }
+        }
+        
         ~this() {
-            if (_initialized) {
-                // Close and unlink all control queues
-                foreach (i; 0.._numReplicas) {
-                    if (_controlQueues[i] != cast(mqd_t)-1) {
-                        mq_close(_controlQueues[i]);
-                        // Use stored C string path - guaranteed valid
-                        mq_unlink(_controlQueuePaths[i].ptr);
+            // Close active connections
+            foreach (socket; _connections) {
+                if (socket !is null) socket.close();
+            }
+            
+            // Close any remaining server sockets
+            foreach (socket; _serverSockets) {
+                if (socket !is null) socket.close();
+            }
+            
+            // Clean up socket files
+            foreach (path; _socketPaths) {
+                remove(path);
+            }
+        }
+        
+        // Returns array of worker indices that have events (read or write)
+        size_t[] checkReadyWorkers(int timeout = 0) {
+            import core.sys.posix.poll : POLLIN, POLLOUT;
+            
+            size_t[] readyWorkers;
+            
+            // Poll for available data or write availability
+            auto result = poll(_pollFds.ptr, _pollFds.length, timeout);
+            if (result < 0) {
+                import core.stdc.errno : errno;
+                throw new Exception(
+                    "Poll failed: " ~ 
+                    fromStringz(strerror(errno)).idup
+                );
+            }
+            
+            if (result > 0) {
+                foreach (i; 0.._pollFds.length) {
+                    if (_pollFds[i].revents & (POLLIN | POLLOUT)) {
+                        readyWorkers ~= i;
                     }
                 }
-                
-                // Close and unlink result queue
-                if (_resultQueue != cast(mqd_t)-1) {
-                    mq_close(_resultQueue);
-                    mq_unlink(ResultPath.ptr);
+            }
+            
+            return readyWorkers;
+        }
+        
+        void queueJob(ReplicaJob!V job) {
+            _pendingJobs ~= job;
+        }
+        
+        bool hasQueuedJobs() {
+            return _pendingJobs.length > 0;
+        }
+        
+        bool tryAssignJob(size_t workerId) {
+            import core.sys.posix.poll : POLLOUT;
+            
+            // Only try to assign if worker can accept data
+            if (_pollFds[workerId].revents & POLLOUT) {
+                if (_pendingJobs.length > 0) {
+                    auto socket = _connections[workerId];
+                    auto job = _pendingJobs[0];
+                    _pendingJobs = _pendingJobs[1..$];
+                    
+                    // Send parameters
+                    socket.send((&job.temperature)[0..1]);
+                    socket.send((&job.proposedMultiplier)[0..1]);
+                    
+                    // Send positions array size and data
+                    auto size = job.proposedPositions.length;
+                    socket.send((&size)[0..1]);
+                    socket.send(job.proposedPositions);
+                    
+                    // Store current job
+                    _currentJobs[workerId] = job;
+                    return true;
                 }
             }
+            return false;
         }
-
-        // Master method - send control message to specific worker
-        void sendControl(ControlMessage!V msg) {
-            ubyte[] buffer;
-            msg.serialize(buffer);
-            
-            // Use worker's dedicated control queue
-            size_t workerId = msg.replicaId;
-            verifyMessageSize(buffer.length, _controlQueues[workerId], "Control");
-            
-            if (mq_send(_controlQueues[workerId], cast(char*)buffer.ptr, buffer.length, 0) == -1) {
-                string error = format("Failed to send control message to worker %d: %s",
-                    workerId, fromStringz(strerror(errno)));
-                throw new Exception(error);
-            }
+        
+        double receiveEnergy(size_t workerId) {
+            double energy;
+            _connections[workerId].receive((&energy)[0..1]);
+            return energy;
         }
-
-        StateMessage!V receiveResult() {
-            auto attr = getQueueAttributes(_resultQueue);
-            ubyte[] buffer = new ubyte[attr.mq_msgsize];
-            ssize_t size = mq_receive(
-                _resultQueue, 
-                cast(char*)buffer.ptr, 
-                attr.mq_msgsize, 
-                null
-            );
-            
-            if (size == -1) {
-                string error = format("Failed to receive result: %s", fromStringz(strerror(errno)));
-                throw new Exception(error);
-            }
-                
-            return StateMessage!V.deserialize(buffer[0..size]);
+        
+        string getSocketPath(size_t workerId) {
+            return _socketPaths[workerId];
         }
-
-        // Worker method - receive control message from worker's queue
-        ControlMessage!V receiveControl(size_t workerId) {
-            auto attr = getQueueAttributes(_controlQueues[workerId]);
-            ubyte[] buffer = new ubyte[attr.mq_msgsize];
-            ssize_t size = mq_receive(
-                _controlQueues[workerId],
-                cast(char*)buffer.ptr,
-                attr.mq_msgsize,
-                null
-            );
-
-            if (size == -1) {
-                string error = format("Failed to receive control message for worker %d: %s",
-                    workerId, fromStringz(strerror(errno)));
-                throw new Exception(error);
-            }
-
-            auto msg = ControlMessage!V.deserialize(buffer[0..size]);
-            if (msg.replicaId != workerId) {
-                throw new Exception(format("Worker %d received message intended for worker %d",
-                    workerId, msg.replicaId));
-            }
-            return msg;
+        
+        bool isWorkerBusy(size_t workerId) {
+            import core.sys.posix.poll : POLLOUT;
+            return !(_pollFds[workerId].revents & POLLOUT);
         }
-
-        void sendResult(StateMessage!V msg) {
-            ubyte[] buffer;
-            msg.serialize(buffer);
-            
-            verifyMessageSize(buffer.length, _resultQueue, "State");
-            
-            if (mq_send(_resultQueue, cast(char*)buffer.ptr, buffer.length, 0) == -1) {
-                string error = format("Failed to send result: %s", fromStringz(strerror(errno)));
-                throw new Exception(error);
-            }
+        
+        ref const(ReplicaJob!V) getCurrentJob(size_t workerId) {
+            return _currentJobs[workerId];
         }
 }
+
 // Result type containing positions and scalar Lagrange multiplier
 struct OptimizationResult(T, V) if (isMaterialPoint!(T, V)) {
     V[] positions;
@@ -512,7 +296,7 @@ OptimizationSolver!(T, V) createOptimizer(T, V)(
             config.tolerance,
             config.max_iterations,
             config.getNumReplicas(),
-            0,  // Auto-detect number of processes based on CPU count
+            config.getNumProcesses(),
             config.parallel_tempering.min_temperature,
             config.parallel_tempering.max_temperature
         );
@@ -548,38 +332,6 @@ abstract class OptimizationSolver(T, V) if (isMaterialPoint!(T, V)) {
 }
 
 /**
- * Optimization implementations available:
- * 1. Gradient descent: Standard gradient-based optimization with momentum and learning rate/step size control
- * 2. Parallel tempering: Multi-replica optimization using MCMC sampling at different temperatures for better
- *    exploration of non-convex problems. Features:
- *    - Replicas: Multiple copies of system at different temperatures (defaults to CPU core count)
- *    - Temperature range: From min_temperature (cold/exploitation) to max_temperature (hot/exploration)
- *    - Energy-based replica swapping: Replicas exchange temperatures based on energy ordering
- *    - Metropolis acceptance: Probabilistic acceptance of proposed moves
- *
- * See OptimizationConfig in io.simulation_loader for configuration details.
- */
-
-// Optimizer selection enum
-enum OptimizerType {
-    GradientDescent,
-    ParallelTempering
-}
-
-/**
- * Internal messaging system for parallel tempering:
- * - Parent -> Replica: Temperature assignments for sampling
- * - Replica -> Parent: State reports containing positions and energy
- *
- * Serialization format:
- * - Temperature: Single double value
- * - State report: [energy, multiplier, positions...]
- */
-
-// Removed System V semaphore helper functions - using POSIX sem_wait/sem_post directly
-
-
-/**
  * Parallel Tempering solver for non-convex optimization problems.
  *
  * This solver maintains multiple replicas of the system at different temperatures,
@@ -600,6 +352,7 @@ enum OptimizerType {
  *   "max_iterations": 1000,
  *   "parallel_tempering": {
  *     "num_replicas": 8,  // Optional: defaults to CPU count
+ *     "num_processes": 4,  // Optional: defaults to CPU count
  *     "min_temperature": 0.1,
  *     "max_temperature": 2.0
  *   }
@@ -607,24 +360,36 @@ enum OptimizerType {
  */
 class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
     private:
+        static struct BestSolution(V) {
+            V[] positions;
+            double multiplier;
+            double energy = double.infinity;
+
+            this(V[] pos, double mult, double e = double.infinity) {
+                positions = pos.dup;
+                multiplier = mult;
+                energy = e;
+            }
+        }
+
         size_t _numReplicas;
         size_t _numProcesses;
         double _minTemperature;
         double _maxTemperature;
         double _gradientStepSize = 1e-6;
-        bool _queuesInitialized;
+        
+        // Replica state management
+        static struct ReplicaState {
+            V[] positions;
+            double multiplier;
+            double energy;
+            double temperature;
+        }
+        ReplicaState[] _replicas;
         
         // Resource management
         ProcessManager _processManager;
-        MessageQueueManager!V _queueManager;
-
-        // Initialize message queues if not already done
-        void initializeQueues(size_t numPositions) {
-            if (!_queuesInitialized) {
-                _queueManager = new MessageQueueManager!V(numPositions, _numReplicas);
-                _queuesInitialized = true;
-            }
-        }
+        WorkerSocketManager!V _socketManager;
         
         // Initialize replica temperatures using geometric progression
         double[] initializeTemperatures() {
@@ -638,10 +403,10 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
         }
         
         // Sort states by energy and return reordered temperatures
-        double[] reorderTemperatures(StateMessage!V[] states, double[] temperatures) {
-            import std.algorithm : sort, map;
+        double[] reorderTemperatures(double[] temperatures) {
+            import std.algorithm : sort;
             
-            // Collect all states and their energies
+            // Collect energies and indices
             struct StateEnergy {
                 size_t stateIndex;
                 double energy;
@@ -649,7 +414,7 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
             
             auto allStates = new StateEnergy[_numReplicas];
             foreach (i; 0.._numReplicas) {
-                allStates[i] = StateEnergy(i, states[i].energy);
+                allStates[i] = StateEnergy(i, _replicas[i].energy);
             }
             
             // Sort by energy
@@ -664,60 +429,6 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
             return newTemps;
         }
         
-        // Run replica process
-        void runReplicaProcess(size_t replicaId, V[] positions, double multiplier,
-                             ObjectiveFunction!(T, V) objective) {
-            // Initialize state
-            auto currentPositions = positions.dup;
-            auto currentEnergy = objective.evaluate(positions, multiplier);
-            
-            // Process main loop
-            while (true) {
-                // Wait for temperature assignment from dedicated queue
-                auto control = _queueManager.receiveControl(replicaId);
-                double temperature = control.temperature;
-                
-                // Generate proposal using random walk
-                foreach (ref pos; positions) {
-                    auto perturbation = V.zero();
-                    foreach (dim; 0..V.dimension) {
-                        auto unitVec = V.zero();
-                        unitVec[dim] = 1.0;
-                        unitVec = unitVec * (normal(0, sqrt(temperature)) * _gradientStepSize);
-                        perturbation = perturbation + unitVec;
-                    }
-                    pos = pos + perturbation;
-                }
-                
-                multiplier += normal(0, sqrt(temperature)) * _gradientStepSize;
-                
-                // Evaluate proposal
-                double proposedEnergy = objective.evaluate(positions, multiplier);
-                
-                // Metropolis acceptance
-                if (proposedEnergy > currentEnergy && 
-                    uniform01() >= exp((currentEnergy - proposedEnergy) / temperature)) {
-                    // Reject proposal
-                    foreach (i; 0..positions.length) {
-                        positions[i] = currentPositions[i];
-                    }
-                } else {
-                    // Accept proposal
-                    currentEnergy = proposedEnergy;
-                    currentPositions[] = positions[];
-                }
-                
-                // Send state update
-                auto state = StateMessage!V(
-                    replicaId,
-                    currentEnergy,
-                    multiplier,
-                    currentPositions
-                );
-                _queueManager.sendResult(state);
-            }
-        }
-
     public:
         this(double tolerance = 1e-6, size_t maxIterations = 1000,
              size_t numReplicas = 4, size_t numProcesses = 0,
@@ -727,89 +438,194 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
             _numProcesses = numProcesses > 0 ? numProcesses : totalCPUs;
             _minTemperature = minTemperature;
             _maxTemperature = maxTemperature;
-            _queuesInitialized = false;  // Start with queues uninitialized
         }
         
-        ~this() {
-            // Resources clean themselves up through their destructors
+        // Handle worker process logic
+        private void handleWorkerProcess(
+            size_t workerId,
+            ObjectiveFunction!(T, V) objective
+        ) {
+            try {
+                // Connect to the socket
+                auto socket = new Socket(AddressFamily.UNIX, SocketType.STREAM);
+                socket.connect(new UnixAddress(_socketManager.getSocketPath(workerId)));
+                
+                // Process evaluation requests
+                while (true) {
+                    // Read parameters
+                    double temperature, multiplier;
+                    socket.receive((&temperature)[0..1]);
+                    socket.receive((&multiplier)[0..1]);
+                    
+                    // Read positions array
+                    size_t numPositions;
+                    socket.receive((&numPositions)[0..1]);
+                    auto positions = new V[numPositions];
+                    auto received = socket.receive(positions);
+                    
+                    if (received != V.sizeof * numPositions) {
+                        throw new Exception("Incomplete position data received");
+                    }
+                    
+                    // Evaluate objective and return result
+                    double energy = objective.evaluate(positions, multiplier);
+                    socket.send((&energy)[0..1]);
+                }
+            } catch (Exception e) {
+                stderr.writefln("Worker %d error: %s", workerId, e.msg);
+            }
         }
-
+        
+        // Process completed evaluation
+        void processResult(ref BestSolution!V best, size_t workerId, double proposedEnergy) {
+            auto job = _socketManager.getCurrentJob(workerId);
+            
+            // Metropolis acceptance
+            if (proposedEnergy <= job.currentEnergy || 
+                uniform01() < exp((job.currentEnergy - proposedEnergy) / job.temperature)) {
+                // Accept proposal
+                _replicas[job.replicaId].positions = job.proposedPositions.dup;
+                _replicas[job.replicaId].multiplier = job.proposedMultiplier;
+                _replicas[job.replicaId].energy = proposedEnergy;
+                
+                // Update best solution if needed
+                if (proposedEnergy < best.energy) {
+                    best.energy = proposedEnergy;
+                    best.positions = job.proposedPositions.dup;
+                    best.multiplier = job.proposedMultiplier;
+                }
+            }
+        }
+        
+        // Generate proposal for replica
+        ReplicaJob!V generateProposal(size_t replicaId) {
+            auto replica = _replicas[replicaId];
+            
+            // Generate proposed positions with random walk
+            auto proposedPositions = replica.positions.dup;
+            foreach (ref pos; proposedPositions) {
+                auto perturbation = V.zero();
+                foreach (dim; 0..V.dimension) {
+                    auto unitVec = V.zero();
+                    unitVec[dim] = 1.0;
+                    perturbation = perturbation + 
+                        unitVec * (normal(0, sqrt(replica.temperature)) * _gradientStepSize);
+                }
+                pos = pos + perturbation;
+            }
+            
+            // Generate proposed multiplier
+            double proposedMultiplier = replica.multiplier + 
+                normal(0, sqrt(replica.temperature)) * _gradientStepSize;
+                
+            return ReplicaJob!V(
+                replicaId,
+                proposedPositions,
+                proposedMultiplier,
+                replica.temperature,
+                replica.energy
+            );
+        }
+        
+        // Helper to check if any workers are still processing
+        private bool hasActiveWorkers() {
+            foreach (i; 0.._numProcesses) {
+                if (_socketManager.isWorkerBusy(i)) return true;
+            }
+            return false;
+        }
+        
         override OptimizationResult!(T, V) minimize(
             V[] initialPositions,
             double initialMultiplier,
             ObjectiveFunction!(T, V) objective
         ) {
-            // Lazy initialization of message queues
-            initializeQueues(initialPositions.length);
+            // Initialize managers
+            _socketManager = new WorkerSocketManager!V(_numProcesses);
+            scope(exit) destroy(_socketManager);
+            _processManager = new ProcessManager(_numProcesses);
+            scope(exit) _processManager.cleanupProcesses();
+            
+            // Setup sockets first
+            _socketManager.initializeSockets();
+            
+            // Initialize replica states
+            _replicas = new ReplicaState[_numReplicas];
+            foreach (ref replica; _replicas) {
+                replica.positions = initialPositions.dup;
+                replica.multiplier = initialMultiplier;
+            }
             
             // Initialize temperatures
             auto temperatures = initializeTemperatures();
+            foreach (i; 0.._numReplicas) {
+                _replicas[i].temperature = temperatures[i];
+            }
             
-            // Spawn worker processes
-            _processManager = new ProcessManager(_numReplicas);
-            _processManager.spawnWorkers((size_t i) {
-                try {
-                    writeln("Replica ", i, " (PID ", thisProcessID(), ") starting");
-                    stdout.flush();
-                    
-                    runReplicaProcess(i, initialPositions.dup, initialMultiplier, objective);
-                } catch (Exception e) {
-                    stderr.writeln("Replica ", i, " error: ", e.msg);
-                }
+            // Spawn workers and establish connections
+            _processManager.spawnWorkers((size_t workerId) {
+                handleWorkerProcess(workerId, objective);
             });
             
-            // Track best solution and collect states
-            double bestEnergy = double.infinity;
-            V[] bestPositions;
-            double bestMultiplier;
-            auto states = new StateMessage!V[_numReplicas];
+            // Accept connections from all workers
+            _socketManager.acceptConnections();
             
-            // Main optimization loop
+            // Track best solution
+            auto best = BestSolution!V(
+                initialPositions.dup,
+                initialMultiplier,
+                double.infinity
+            );
+            
+            // Main optimization loop with asynchronous processing
             for (size_t iter = 0; iter < _maxIterations; ++iter) {
-                // Send temperature assignments to all replicas
+                // Queue proposals for all replicas
                 foreach (i; 0.._numReplicas) {
-                    auto msg = ControlMessage!V(
-                        ControlMessageType.TEMPERATURE_ASSIGNMENT,
-                        temperatures[i],
-                        i
-                    );
-                    _queueManager.sendControl(msg);
+                    _socketManager.queueJob(generateProposal(i));
                 }
                 
-                // Collect results from all replicas
-                foreach (i; 0.._numReplicas) {
-                    states[i] = _queueManager.receiveResult();
+                // Process jobs asynchronously using poll for both read and write
+                while (_socketManager.hasQueuedJobs || hasActiveWorkers()) {
+                    import core.sys.posix.poll : POLLIN, POLLOUT;
                     
-                    // Update best solution if needed
-                    if (states[i].energy < bestEnergy) {
-                        bestEnergy = states[i].energy;
-                        bestMultiplier = states[i].multiplier;
-                        bestPositions = states[i].positions.dup;
+                    // Check socket states
+                    auto readyWorkers = _socketManager.checkReadyWorkers(100);  // 100ms timeout
+                    
+                    // Process ready sockets
+                    foreach (workerId; readyWorkers) {
+                        auto events = _socketManager._pollFds[workerId].revents;
+                        
+                        // Handle write events (assign new jobs)
+                        if ((events & POLLOUT) && _socketManager.hasQueuedJobs()) {
+                            _socketManager.tryAssignJob(workerId);
+                        }
+                        
+                        // Handle read events (process completed jobs)
+                        if (events & POLLIN) {
+                            double result = _socketManager.receiveEnergy(workerId);
+                            processResult(best, workerId, result);
+                        }
                     }
                 }
                 
                 // Check convergence
-                double minEnergy = double.infinity;
-                foreach (state; states) {
-                    if (state.energy < minEnergy) {
-                        minEnergy = state.energy;
+                bool converged = true;
+                foreach (replica; _replicas) {
+                    if (abs(replica.energy - best.energy) >= _tolerance) {
+                        converged = false;
+                        break;
                     }
                 }
-                
-                if (iter > 0 && abs(minEnergy - bestEnergy) < _tolerance) {
-                    break;
-                }
+                //if (converged) break;
                 
                 // Reorder temperatures based on energies
-                temperatures = reorderTemperatures(states, temperatures);
+                temperatures = reorderTemperatures(temperatures);
+                foreach (i; 0.._numReplicas) {
+                    _replicas[i].temperature = temperatures[i];
+                }
             }
             
-            // All results have been collected, so we can terminate the replicas
-            writeln("All replica results collected, terminating replicas...");
-            stdout.flush();
-            _processManager.cleanupProcesses();
-            
-            return OptimizationResult!(T, V)(bestPositions, bestMultiplier);
+            return OptimizationResult!(T, V)(best.positions, best.multiplier);
         }
 }
 

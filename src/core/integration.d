@@ -57,8 +57,8 @@ class SystemLagrangian(T, V) : ObjectiveFunction!(T, V) if (isMaterialPoint!(T, 
                 _proposedVelocities
             );
             
-            //return totalLagrangian - multiplier * constraintViolation;
-            return totalLagrangian - 1000000 * constraintViolation;
+            return totalLagrangian - multiplier * constraintViolation;
+            //return totalLagrangian - 1000000 * constraintViolation;
         }
 }
 

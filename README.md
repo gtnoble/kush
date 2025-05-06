@@ -88,6 +88,7 @@ Each line defines a point:
     },
     "parallel_tempering": {            // Only used when solver_type is "parallel_tempering"
       "num_replicas": 8,              // Optional: defaults to CPU core count
+      "num_processes": 4,             // Optional: defaults to CPU core count
       "min_temperature": 0.1,         // Controls local optimization (cold replicas)
       "max_temperature": 2.0          // Controls global exploration (hot replicas)
     }

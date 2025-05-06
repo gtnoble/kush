@@ -3,14 +3,15 @@
   "optimization": {
     "solver_type": "parallel_tempering",
     "tolerance": 1e-6,
-    "max_iterations": 100,
+    "max_iterations": 1,
     "gradient_step_size": {
-      "horizon_fraction": 1e-6
+      "horizon_fraction": 1e-4
     },
     "parallel_tempering": {
       "min_temperature": 1e-6,
-      "max_temperature": 2,
-      "num_replicas": 16
+      "max_temperature": 20,
+      "num_replicas": 128,
+      "num_processes": 1
     }
   },
   "time_stepping": {

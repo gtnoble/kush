@@ -1,3 +1,1 @@
-Add volume partitioning to material points to allow for non-uniform point spacing.
-  Particle mass would be assigned based on density and partitioned volume.
-  Voronoi tesselation?
+Instead of one message queue per replica, lets have one message queue per child process

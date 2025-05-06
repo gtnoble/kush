@@ -36,8 +36,17 @@ struct OptimizationConfig {
     // Parallel tempering specific settings
     struct ParallelTempering {
         size_t num_replicas;  // Defaults to totalCPUs if not specified
+        size_t num_processes;  // Defaults to totalCPUs if not specified
         double min_temperature = 0.1;
         double max_temperature = 2.0;
+    }
+
+    size_t getNumProcesses() const {
+        import std.parallelism : totalCPUs;
+        if (solver_type != "parallel_tempering") return 0;
+        if (parallel_tempering.num_processes > 0)
+            return parallel_tempering.num_processes;
+        return totalCPUs;
     }
     ParallelTempering parallel_tempering;
     
@@ -141,6 +150,12 @@ private OptimizationConfig parseOptimizationConfig(JSONValue json) {
             config.parallel_tempering.num_replicas = pt["num_replicas"].get!size_t;
             enforce(config.parallel_tempering.num_replicas > 1,
                 "Number of replicas must be greater than 1");
+        }
+
+        if ("num_processes" in pt) {
+            config.parallel_tempering.num_processes = pt["num_processes"].get!size_t;
+            enforce(config.parallel_tempering.num_processes > 0,
+                "Number of processes must be positive");
         }
         
         if ("min_temperature" in pt) {
