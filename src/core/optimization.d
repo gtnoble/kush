@@ -28,6 +28,13 @@ import std.uuid : randomUUID;
 import std.file : remove;
 import core.sys.posix.poll : poll, pollfd, POLLIN;
 
+enum ReadyStatus {
+    ReadyToRead = 0,
+    ReadyToWrite = 1,
+    ReadyToReadWrite = 2,
+    NotReady = 3
+}
+
 
 // Helper for normal distribution sampling
 private double normal(double mean, double stddev) {
@@ -74,19 +81,45 @@ class ProcessManager {
         }
 }
 
+private struct ReplicaConfiguration(V) {
+    V[] positions;  // Current positions of the replica
+    double multiplier;  // Scalar multiplier for velocity constraints
+
+    void send(Socket socket) {
+        socket.send((&multiplier)[0..1]);
+
+        // Send positions array size and data
+        size_t size = positions.length;
+        socket.send((&size)[0..1]);
+        socket.send(positions);
+    }
+        
+
+    static receiveJob(Socket socket) {
+        ReplicaConfiguration!V job;
+        
+        // Receive parameters
+        socket.receive((&job.multiplier)[0..1]);
+        
+        // Receive positions array size and data
+        size_t size;
+        socket.receive((&size)[0..1]);
+        job.positions = new V[size];
+        auto received = socket.receive(job.positions);
+        
+        if (received != V.sizeof * size) {
+            throw new Exception("Incomplete position data received");
+        }
+        
+        return job;
+    }
+}
+
 /**
  * Socket manager for worker communication.
  * Handles creation, connection, and cleanup of Unix domain sockets.
  */
 // Worker jobs and state
-private struct ReplicaJob(V) {
-    size_t replicaId;           // Which replica this job is for
-    V[] proposedPositions;      // Proposed new positions
-    double proposedMultiplier;  // Proposed new multiplier
-    double temperature;         // Current temperature
-    double currentEnergy;       // Current energy for acceptance check
-}
-
 class WorkerSocketManager(V) {
     private:
         Socket[] _serverSockets;    // Listening sockets
@@ -95,8 +128,6 @@ class WorkerSocketManager(V) {
         size_t _numWorkers;
         bool _initialized;
         pollfd[] _pollFds;         // For poll-based monitoring
-        ReplicaJob!V[] _currentJobs;// Track current job per worker
-        ReplicaJob!V[] _pendingJobs;// Jobs waiting to be assigned
         
     public:
         this(size_t numWorkers) {
@@ -104,8 +135,6 @@ class WorkerSocketManager(V) {
             _serverSockets = new Socket[numWorkers];
             _connections = new Socket[numWorkers];
             _socketPaths = new string[numWorkers];
-            _currentJobs = new ReplicaJob!V[numWorkers];
-            _pendingJobs = [];
             _initialized = false;
         }
         
@@ -182,10 +211,10 @@ class WorkerSocketManager(V) {
         }
         
         // Returns array of worker indices that have events (read or write)
-        size_t[] checkReadyWorkers(int timeout = 0) {
+        ReadyStatus[] checkReadyWorkers(int timeout = 0) {
             import core.sys.posix.poll : POLLIN, POLLOUT;
             
-            size_t[] readyWorkers;
+            ReadyStatus[] readyWorkers = new ReadyStatus[_numWorkers];
             
             // Poll for available data or write availability
             auto result = poll(_pollFds.ptr, _pollFds.length, timeout);
@@ -199,48 +228,22 @@ class WorkerSocketManager(V) {
             
             if (result > 0) {
                 foreach (i; 0.._pollFds.length) {
-                    if (_pollFds[i].revents & (POLLIN | POLLOUT)) {
-                        readyWorkers ~= i;
+                    if (_pollFds[i].revents & POLLIN & POLLOUT) {
+                        readyWorkers[i] = ReadyStatus.ReadyToReadWrite;
+                    }
+                    else if (_pollFds[i].revents & POLLIN) {
+                        readyWorkers[i] = ReadyStatus.ReadyToRead;
+                    }
+                    else if (_pollFds[i].revents & POLLOUT) {
+                        readyWorkers[i] = ReadyStatus.ReadyToWrite;
+                    }
+                    else {
+                        readyWorkers[i] = ReadyStatus.NotReady;
                     }
                 }
             }
             
             return readyWorkers;
-        }
-        
-        void queueJob(ReplicaJob!V job) {
-            _pendingJobs ~= job;
-        }
-        
-        bool hasQueuedJobs() {
-            return _pendingJobs.length > 0;
-        }
-        
-        bool tryAssignJob(size_t workerId) {
-            import core.sys.posix.poll : POLLOUT;
-            
-            // Only try to assign if worker can accept data
-            if (_pollFds[workerId].revents & POLLOUT) {
-                if (_pendingJobs.length > 0) {
-                    auto socket = _connections[workerId];
-                    auto job = _pendingJobs[0];
-                    _pendingJobs = _pendingJobs[1..$];
-                    
-                    // Send parameters
-                    socket.send((&job.temperature)[0..1]);
-                    socket.send((&job.proposedMultiplier)[0..1]);
-                    
-                    // Send positions array size and data
-                    auto size = job.proposedPositions.length;
-                    socket.send((&size)[0..1]);
-                    socket.send(job.proposedPositions);
-                    
-                    // Store current job
-                    _currentJobs[workerId] = job;
-                    return true;
-                }
-            }
-            return false;
         }
         
         double receiveEnergy(size_t workerId) {
@@ -253,13 +256,8 @@ class WorkerSocketManager(V) {
             return _socketPaths[workerId];
         }
         
-        bool isWorkerBusy(size_t workerId) {
-            import core.sys.posix.poll : POLLOUT;
-            return !(_pollFds[workerId].revents & POLLOUT);
-        }
-        
-        ref const(ReplicaJob!V) getCurrentJob(size_t workerId) {
-            return _currentJobs[workerId];
+        Socket getSocket(size_t workerId) {
+            return _connections[workerId];
         }
 }
 
@@ -378,15 +376,6 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
         double _maxTemperature;
         double _gradientStepSize = 1e-6;
         
-        // Replica state management
-        static struct ReplicaState {
-            V[] positions;
-            double multiplier;
-            double energy;
-            double temperature;
-        }
-        ReplicaState[] _replicas;
-        
         // Resource management
         ProcessManager _processManager;
         WorkerSocketManager!V _socketManager;
@@ -403,7 +392,7 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
         }
         
         // Sort states by energy and return reordered temperatures
-        double[] reorderTemperatures(double[] temperatures) {
+        double[] reorderTemperatures(double[] temperatures, double[] energies) {
             import std.algorithm : sort;
             
             // Collect energies and indices
@@ -414,7 +403,7 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
             
             auto allStates = new StateEnergy[_numReplicas];
             foreach (i; 0.._numReplicas) {
-                allStates[i] = StateEnergy(i, _replicas[i].energy);
+                allStates[i] = StateEnergy(i, energies[i]);
             }
             
             // Sort by energy
@@ -453,22 +442,10 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
                 // Process evaluation requests
                 while (true) {
                     // Read parameters
-                    double temperature, multiplier;
-                    socket.receive((&temperature)[0..1]);
-                    socket.receive((&multiplier)[0..1]);
-                    
-                    // Read positions array
-                    size_t numPositions;
-                    socket.receive((&numPositions)[0..1]);
-                    auto positions = new V[numPositions];
-                    auto received = socket.receive(positions);
-                    
-                    if (received != V.sizeof * numPositions) {
-                        throw new Exception("Incomplete position data received");
-                    }
-                    
+                    ReplicaConfiguration!V job = ReplicaConfiguration!V.receiveJob(socket);
+
                     // Evaluate objective and return result
-                    double energy = objective.evaluate(positions, multiplier);
+                    double energy = objective.evaluate(job.positions, job.multiplier);
                     socket.send((&energy)[0..1]);
                 }
             } catch (Exception e) {
@@ -476,63 +453,25 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
             }
         }
         
-        // Process completed evaluation
-        void processResult(ref BestSolution!V best, size_t workerId, double proposedEnergy) {
-            auto job = _socketManager.getCurrentJob(workerId);
-            
-            // Metropolis acceptance
-            if (proposedEnergy <= job.currentEnergy || 
-                uniform01() < exp((job.currentEnergy - proposedEnergy) / job.temperature)) {
-                // Accept proposal
-                _replicas[job.replicaId].positions = job.proposedPositions.dup;
-                _replicas[job.replicaId].multiplier = job.proposedMultiplier;
-                _replicas[job.replicaId].energy = proposedEnergy;
-                
-                // Update best solution if needed
-                if (proposedEnergy < best.energy) {
-                    best.energy = proposedEnergy;
-                    best.positions = job.proposedPositions.dup;
-                    best.multiplier = job.proposedMultiplier;
-                }
-            }
-        }
-        
         // Generate proposal for replica
-        ReplicaJob!V generateProposal(size_t replicaId) {
-            auto replica = _replicas[replicaId];
+        ReplicaConfiguration!V generateProposal(ReplicaConfiguration!V previousReplica) {
             
             // Generate proposed positions with random walk
-            auto proposedPositions = replica.positions.dup;
-            foreach (ref pos; proposedPositions) {
-                auto perturbation = V.zero();
+            auto proposedPositions = previousReplica.positions.dup;
+            foreach (i, pos; proposedPositions) {
                 foreach (dim; 0..V.dimension) {
-                    auto unitVec = V.zero();
-                    unitVec[dim] = 1.0;
-                    perturbation = perturbation + 
-                        unitVec * (normal(0, sqrt(replica.temperature)) * _gradientStepSize);
+                    proposedPositions[i][dim] += normal(0, _gradientStepSize);
                 }
-                pos = pos + perturbation;
             }
             
             // Generate proposed multiplier
-            double proposedMultiplier = replica.multiplier + 
-                normal(0, sqrt(replica.temperature)) * _gradientStepSize;
+            double proposedMultiplier = previousReplica.multiplier + 
+                normal(0, _gradientStepSize);
                 
-            return ReplicaJob!V(
-                replicaId,
+            return ReplicaConfiguration!V(
                 proposedPositions,
                 proposedMultiplier,
-                replica.temperature,
-                replica.energy
             );
-        }
-        
-        // Helper to check if any workers are still processing
-        private bool hasActiveWorkers() {
-            foreach (i; 0.._numProcesses) {
-                if (_socketManager.isWorkerBusy(i)) return true;
-            }
-            return false;
         }
         
         override OptimizationResult!(T, V) minimize(
@@ -549,19 +488,18 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
             // Setup sockets first
             _socketManager.initializeSockets();
             
-            // Initialize replica states
-            _replicas = new ReplicaState[_numReplicas];
-            foreach (ref replica; _replicas) {
-                replica.positions = initialPositions.dup;
-                replica.multiplier = initialMultiplier;
-            }
-            
             // Initialize temperatures
-            auto temperatures = initializeTemperatures();
-            foreach (i; 0.._numReplicas) {
-                _replicas[i].temperature = temperatures[i];
-            }
+            auto replicaTemperatures = initializeTemperatures();
+            auto replicaEnergies = new double[_numReplicas];
+            replicaEnergies[] = double.infinity;
             
+            auto initialConfig = ReplicaConfiguration!V(
+                initialPositions.dup,
+                initialMultiplier
+            );
+            auto replicaConfigurations = new ReplicaConfiguration!V[_numReplicas];
+            replicaConfigurations[] = initialConfig;
+
             // Spawn workers and establish connections
             _processManager.spawnWorkers((size_t workerId) {
                 handleWorkerProcess(workerId, objective);
@@ -579,50 +517,59 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
             
             // Main optimization loop with asynchronous processing
             for (size_t iter = 0; iter < _maxIterations; ++iter) {
-                // Queue proposals for all replicas
-                foreach (i; 0.._numReplicas) {
-                    _socketManager.queueJob(generateProposal(i));
-                }
                 
+                int numGatheredResults = 0;
+                int numJobsAssigned = 0;
+                ReplicaConfiguration!V[] proposedStates = new ReplicaConfiguration!V[_numReplicas];
+                double[] proposedEnergies = new double[_numReplicas];
+
                 // Process jobs asynchronously using poll for both read and write
-                while (_socketManager.hasQueuedJobs || hasActiveWorkers()) {
-                    import core.sys.posix.poll : POLLIN, POLLOUT;
+                while (numJobsAssigned < _numReplicas || numGatheredResults < _numReplicas) {
                     
                     // Check socket states
                     auto readyWorkers = _socketManager.checkReadyWorkers(100);  // 100ms timeout
                     
                     // Process ready sockets
-                    foreach (workerId; readyWorkers) {
-                        auto events = _socketManager._pollFds[workerId].revents;
+                    foreach (workerId, status; readyWorkers) {
                         
                         // Handle write events (assign new jobs)
-                        if ((events & POLLOUT) && _socketManager.hasQueuedJobs()) {
-                            _socketManager.tryAssignJob(workerId);
+                        if (status == ReadyStatus.ReadyToWrite || status == ReadyStatus.ReadyToReadWrite) {
+                            proposedStates[workerId] = generateProposal(replicaConfigurations[workerId]);
+                            auto socket = _socketManager.getSocket(workerId);
+                            proposedStates[workerId].send(socket);
+                            numJobsAssigned++;
                         }
                         
                         // Handle read events (process completed jobs)
-                        if (events & POLLIN) {
-                            double result = _socketManager.receiveEnergy(workerId);
-                            processResult(best, workerId, result);
+                        if (status == ReadyStatus.ReadyToRead || status == ReadyStatus.ReadyToReadWrite) {
+                            proposedEnergies[workerId] = _socketManager.receiveEnergy(workerId);
+                            numGatheredResults++;
                         }
                     }
                 }
-                
-                // Check convergence
-                bool converged = true;
-                foreach (replica; _replicas) {
-                    if (abs(replica.energy - best.energy) >= _tolerance) {
-                        converged = false;
-                        break;
+
+                for (size_t i = 0; i < _numReplicas; i++) {
+                    // Metropolis acceptance
+                    auto proposedEnergy = proposedEnergies[i];
+                    auto proposedConfig = proposedStates[i];
+                    if (proposedEnergy <= replicaEnergies[i] || 
+                        uniform01() < exp((replicaEnergies[i] - proposedEnergy) / replicaTemperatures[i])) {
+                        // Accept proposal
+                        replicaConfigurations[i] = proposedConfig;
+                        replicaEnergies[i] = proposedEnergy;
+                        
+                        // Update best solution if needed
+                        if (proposedEnergy < best.energy) {
+                            best.energy = proposedEnergy;
+                            best.positions = proposedConfig.positions;
+                            best.multiplier = proposedConfig.multiplier;
+                        }
                     }
+
                 }
-                //if (converged) break;
                 
                 // Reorder temperatures based on energies
-                temperatures = reorderTemperatures(temperatures);
-                foreach (i; 0.._numReplicas) {
-                    _replicas[i].temperature = temperatures[i];
-                }
+                replicaTemperatures = reorderTemperatures(replicaTemperatures, replicaEnergies);
             }
             
             return OptimizationResult!(T, V)(best.positions, best.multiplier);
