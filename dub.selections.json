@@ -1,5 +1,8 @@
 {
 	"fileVersion": 1,
 	"versions": {
+		"concepts": "0.1.0",
+		"nanomsg-wrapper": {"path":"../../../Software/nanomsg-wrapper"},
+		"unit-threaded": "2.2.3"
 	}
 }

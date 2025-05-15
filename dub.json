@@ -7,6 +7,11 @@
     "mainSourceFile": "src/app.d",
     "sourcePaths": ["src"],
     "importPaths": ["src"],
+    "dependencies": {
+        "jumbomessage": {
+            "path": "../jumbo_message"
+        }
+    },
     "buildTypes": {
         "debug": {
             "buildOptions": ["debugMode", "debugInfo"]

@@ -23,10 +23,10 @@ import core.stdc.string : strerror;
 import std.parallelism : totalCPUs;
 import std.process : thisProcessID;
 import std.string : fromStringz;
-import std.socket : Socket, SocketOptionLevel, SocketOption, AddressFamily, SocketType, UnixAddress;
 import std.uuid : randomUUID;
 import std.file : remove;
-import core.sys.posix.poll : poll, pollfd, POLLIN;
+import std.exception : enforce;
+import jumbomessage;
 
 enum ReadyStatus {
     ReadyToRead = 0,
@@ -75,7 +75,7 @@ class ProcessManager {
             foreach (pid; _pids) {
                 if (pid != 0) {
                     kill(pid, SIGTERM);
-                    wait(null);  // Wait for each process to exit
+                    // wait(null);  // Wait for each process to exit
                 }
             }
         }
@@ -85,179 +85,98 @@ private struct ReplicaConfiguration(V) {
     V[] positions;  // Current positions of the replica
     double multiplier;  // Scalar multiplier for velocity constraints
 
-    void send(Socket socket) {
-        socket.send((&multiplier)[0..1]);
-
-        // Send positions array size and data
+    ubyte[] toBytes() {
+        ubyte[] buffer;
+        buffer ~= cast(ubyte[])(&multiplier)[0..1];
+        
+        // Serialize positions array size and data
         size_t size = positions.length;
-        socket.send((&size)[0..1]);
-        socket.send(positions);
+        buffer ~= cast(ubyte[])(&size)[0..1];
+        buffer ~= cast(ubyte[])positions[];
+        
+        return buffer;
+    }
+
+    void send(JumboMessageQueue queue) {
+        queue.send(this.toBytes());
     }
         
-
-    static receiveJob(Socket socket) {
+    static ReplicaConfiguration!V fromBytes(ubyte[] data) {
         ReplicaConfiguration!V job;
+        size_t offset = 0;
         
-        // Receive parameters
-        socket.receive((&job.multiplier)[0..1]);
+        // Deserialize multiplier
+        job.multiplier = *cast(double*)(data.ptr + offset);
+        offset += double.sizeof;
         
-        // Receive positions array size and data
-        size_t size;
-        socket.receive((&size)[0..1]);
+        // Deserialize positions array size and data
+        size_t size = *cast(size_t*)(data.ptr + offset);
+        offset += size_t.sizeof;
+        
         job.positions = new V[size];
-        auto received = socket.receive(job.positions);
-        
-        if (received != V.sizeof * size) {
-            throw new Exception("Incomplete position data received");
-        }
+        job.positions[] = cast(V[])(data[offset..offset + V.sizeof * size])[];
         
         return job;
+    }
+
+    static receiveJob(JumboMessageQueue queue) {
+        return fromBytes(queue.receive());
     }
 }
 
 /**
- * Socket manager for worker communication.
- * Handles creation, connection, and cleanup of Unix domain sockets.
+ * Message queue manager for worker communication.
+ * Handles creation, connection, and cleanup of JumboMessage queues.
  */
-// Worker jobs and state
-class WorkerSocketManager(V) {
+class WorkerQueueManager(V) {
     private:
-        Socket[] _serverSockets;    // Listening sockets
-        Socket[] _connections;      // Active connections
-        string[] _socketPaths;
+        JumboMessageQueue[] _queues;
+        string[] _queueNames;
         size_t _numWorkers;
         bool _initialized;
-        pollfd[] _pollFds;         // For poll-based monitoring
-        
+
     public:
         this(size_t numWorkers) {
             _numWorkers = numWorkers;
-            _serverSockets = new Socket[numWorkers];
-            _connections = new Socket[numWorkers];
-            _socketPaths = new string[numWorkers];
+            _queues = new JumboMessageQueue[numWorkers];
+            _queueNames = new string[numWorkers];
             _initialized = false;
         }
-        
-        void initializeSockets() {
+
+        void initializeQueues() {
             if (_initialized) return;
             
             foreach (i; 0.._numWorkers) {
-                // Create unique socket path
-                _socketPaths[i] = format("/tmp/pd_worker_%d_%s_%d",
+                _queueNames[i] = format("pd_worker_%d_%s_%d",
                     thisProcessID(),
                     randomUUID().toString()[0..8],
                     i);
                 
-                // Create and bind socket
-                _serverSockets[i] = new Socket(AddressFamily.UNIX, SocketType.STREAM);
-                _serverSockets[i].bind(new UnixAddress(_socketPaths[i]));
-                _serverSockets[i].listen(1);
+                _queues[i] = new JumboMessageQueue(_queueNames[i]);
             }
             
             _initialized = true;
         }
-        
-        void acceptConnections() {
-            import std.datetime: dur, Duration;
-            
-            foreach (i; 0.._numWorkers) {
-                // Set accept timeout
-                _serverSockets[i].setOption(SocketOptionLevel.SOCKET,
-                                          SocketOption.RCVTIMEO,
-                                          dur!"seconds"(5));
-                                          
-                // Accept connection
-                try {
-                    _connections[i] = _serverSockets[i].accept();
-                } catch (Exception e) {
-                    throw new Exception(format(
-                        "Worker %d failed to connect within timeout: %s", 
-                        i, e.msg));
-                }
-                
-                // Close server socket, no longer needed
-                _serverSockets[i].close();
-                _serverSockets[i] = null;
-            }
-            
-            import core.sys.posix.poll : POLLIN, POLLOUT;
-            
-            // Initialize poll structures
-            _pollFds = new pollfd[_connections.length];
-            foreach (i; 0.._connections.length) {
-                _pollFds[i] = pollfd(
-                    _connections[i].handle,  // fd
-                    POLLIN | POLLOUT,       // events to monitor (read and write)
-                    0                        // returned events
-                );
-            }
-        }
-        
-        ~this() {
-            // Close active connections
-            foreach (socket; _connections) {
-                if (socket !is null) socket.close();
-            }
-            
-            // Close any remaining server sockets
-            foreach (socket; _serverSockets) {
-                if (socket !is null) socket.close();
-            }
-            
-            // Clean up socket files
-            foreach (path; _socketPaths) {
-                remove(path);
-            }
-        }
-        
-        // Returns array of worker indices that have events (read or write)
-        ReadyStatus[] checkReadyWorkers(int timeout = 0) {
-            import core.sys.posix.poll : POLLIN, POLLOUT;
-            
-            ReadyStatus[] readyWorkers = new ReadyStatus[_numWorkers];
-            
-            // Poll for available data or write availability
-            auto result = poll(_pollFds.ptr, _pollFds.length, timeout);
-            if (result < 0) {
-                import core.stdc.errno : errno;
-                throw new Exception(
-                    "Poll failed: " ~ 
-                    fromStringz(strerror(errno)).idup
-                );
-            }
-            
-            if (result > 0) {
-                foreach (i; 0.._pollFds.length) {
-                    if (_pollFds[i].revents & POLLIN & POLLOUT) {
-                        readyWorkers[i] = ReadyStatus.ReadyToReadWrite;
-                    }
-                    else if (_pollFds[i].revents & POLLIN) {
-                        readyWorkers[i] = ReadyStatus.ReadyToRead;
-                    }
-                    else if (_pollFds[i].revents & POLLOUT) {
-                        readyWorkers[i] = ReadyStatus.ReadyToWrite;
-                    }
-                    else {
-                        readyWorkers[i] = ReadyStatus.NotReady;
-                    }
+
+        void cleanup() {
+            foreach (queue; _queues) {
+                if (queue !is null) {
+                    JumboMessageQueue.cleanup(queue.name);
                 }
             }
-            
-            return readyWorkers;
         }
-        
+
         double receiveEnergy(size_t workerId) {
-            double energy;
-            _connections[workerId].receive((&energy)[0..1]);
-            return energy;
+            auto data = _queues[workerId].receive();
+            return *cast(double*)data.ptr;
         }
-        
-        string getSocketPath(size_t workerId) {
-            return _socketPaths[workerId];
+
+        string getQueueName(size_t workerId) {
+            return _queueNames[workerId];
         }
-        
-        Socket getSocket(size_t workerId) {
-            return _connections[workerId];
+
+        JumboMessageQueue getQueue(size_t workerId) {
+            return _queues[workerId];
         }
 }
 
@@ -378,7 +297,6 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
         
         // Resource management
         ProcessManager _processManager;
-        WorkerSocketManager!V _socketManager;
         
         // Initialize replica temperatures using geometric progression
         double[] initializeTemperatures() {
@@ -435,18 +353,17 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
             ObjectiveFunction!(T, V) objective
         ) {
             try {
-                // Connect to the socket
-                auto socket = new Socket(AddressFamily.UNIX, SocketType.STREAM);
-                socket.connect(new UnixAddress(_socketManager.getSocketPath(workerId)));
+                // Connect to the queue
+                auto queue = new JumboMessageQueue(format("/pd_worker_%d", workerId));
                 
                 // Process evaluation requests
                 while (true) {
                     // Read parameters
-                    ReplicaConfiguration!V job = ReplicaConfiguration!V.receiveJob(socket);
+                    ReplicaConfiguration!V job = ReplicaConfiguration!V.receiveJob(queue);
 
                     // Evaluate objective and return result
                     double energy = objective.evaluate(job.positions, job.multiplier);
-                    socket.send((&energy)[0..1]);
+                    queue.send(cast(ubyte[])(&energy)[0..1]);
                 }
             } catch (Exception e) {
                 stderr.writefln("Worker %d error: %s", workerId, e.msg);
@@ -480,13 +397,13 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
             ObjectiveFunction!(T, V) objective
         ) {
             // Initialize managers
-            _socketManager = new WorkerSocketManager!V(_numProcesses);
-            scope(exit) destroy(_socketManager);
+            auto queueManager = new WorkerQueueManager!V(_numProcesses);
+            scope(exit) queueManager.cleanup();
             _processManager = new ProcessManager(_numProcesses);
             scope(exit) _processManager.cleanupProcesses();
             
-            // Setup sockets first
-            _socketManager.initializeSockets();
+            // Setup queues first
+            queueManager.initializeQueues();
             
             // Initialize temperatures
             auto replicaTemperatures = initializeTemperatures();
@@ -500,13 +417,10 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
             auto replicaConfigurations = new ReplicaConfiguration!V[_numReplicas];
             replicaConfigurations[] = initialConfig;
 
-            // Spawn workers and establish connections
+            // Spawn workers
             _processManager.spawnWorkers((size_t workerId) {
                 handleWorkerProcess(workerId, objective);
             });
-            
-            // Accept connections from all workers
-            _socketManager.acceptConnections();
             
             // Track best solution
             auto best = BestSolution!V(
@@ -515,40 +429,25 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
                 double.infinity
             );
             
-            // Main optimization loop with asynchronous processing
+            // Main optimization loop
             for (size_t iter = 0; iter < _maxIterations; ++iter) {
-                
-                int numGatheredResults = 0;
-                int numJobsAssigned = 0;
                 ReplicaConfiguration!V[] proposedStates = new ReplicaConfiguration!V[_numReplicas];
                 double[] proposedEnergies = new double[_numReplicas];
 
-                // Process jobs asynchronously using poll for both read and write
-                while (numJobsAssigned < _numReplicas || numGatheredResults < _numReplicas) {
-                    
-                    // Check socket states
-                    auto readyWorkers = _socketManager.checkReadyWorkers(100);  // 100ms timeout
-                    
-                    // Process ready sockets
-                    foreach (workerId, status; readyWorkers) {
-                        
-                        // Handle write events (assign new jobs)
-                        if (status == ReadyStatus.ReadyToWrite || status == ReadyStatus.ReadyToReadWrite) {
-                            proposedStates[workerId] = generateProposal(replicaConfigurations[workerId]);
-                            auto socket = _socketManager.getSocket(workerId);
-                            proposedStates[workerId].send(socket);
-                            numJobsAssigned++;
-                        }
-                        
-                        // Handle read events (process completed jobs)
-                        if (status == ReadyStatus.ReadyToRead || status == ReadyStatus.ReadyToReadWrite) {
-                            proposedEnergies[workerId] = _socketManager.receiveEnergy(workerId);
-                            numGatheredResults++;
-                        }
-                    }
+                // Assign jobs to all workers
+                foreach (workerId; 0.._numReplicas) {
+                    proposedStates[workerId] = generateProposal(replicaConfigurations[workerId]);
+                    auto queue = queueManager.getQueue(workerId);
+                    proposedStates[workerId].send(queue);
                 }
 
-                for (size_t i = 0; i < _numReplicas; i++) {
+                // Collect results from all workers
+                foreach (workerId; 0.._numReplicas) {
+                    proposedEnergies[workerId] = queueManager.receiveEnergy(workerId);
+                }
+
+                // Process results
+                foreach (i; 0.._numReplicas) {
                     // Metropolis acceptance
                     auto proposedEnergy = proposedEnergies[i];
                     auto proposedConfig = proposedStates[i];
@@ -588,17 +487,52 @@ enum GradientUpdateMode {
 
 // Gradient message for parallel computation
 private struct GradientMessage(V) {
-    size_t index;
-    V positionGradient;
-    double multiplierGradient;  // Now scalar
+    size_t workerId;          // Worker identifier
+    size_t[] indices;         // Point indices
+    V[] positionGradients;   // Array of gradients
+
+    // Calculate serialized size
+    size_t getSize() const {
+        return 2*size_t.sizeof +            // workerId + array length
+               indices.length * size_t.sizeof +
+               positionGradients.length * V.sizeof;
+    }
 
     void serialize(ref ubyte[] buffer) const {
-        buffer = new ubyte[this.sizeof];
-        (cast(GradientMessage!V*)buffer.ptr)[0] = this;
+        enforce(indices.length == positionGradients.length, 
+               "Mismatched array lengths");
+               
+        auto oldLen = buffer.length;
+        buffer.length = oldLen + this.getSize();
+        auto ptr = buffer.ptr + oldLen;
+        
+        // Serialize metadata
+        (cast(size_t*)ptr)[0] = workerId;
+        (cast(size_t*)ptr)[1] = indices.length;
+        ptr += 2*size_t.sizeof;
+        
+        // Serialize arrays
+        ptr[0..indices.length*size_t.sizeof] = cast(ubyte[])indices[];
+        ptr += indices.length*size_t.sizeof;
+        
+        ptr[0..positionGradients.length*V.sizeof] = cast(ubyte[])positionGradients[];
     }
 
     static GradientMessage!V deserialize(const(ubyte)[] buffer) {
-        return *(cast(const(GradientMessage!V)*)buffer.ptr);
+        enforce(buffer.length >= 2*size_t.sizeof, "Buffer too small");
+        auto ptr = buffer.ptr;
+        
+        GradientMessage!V msg;
+        msg.workerId = (cast(const size_t*)ptr)[0];
+        size_t count = (cast(const size_t*)ptr)[1];
+        ptr += 2*size_t.sizeof;
+        
+        // Deserialize arrays
+        msg.indices = (cast(size_t*)ptr)[0..count];
+        ptr += count*size_t.sizeof;
+        
+        msg.positionGradients = (cast(V*)ptr)[0..count];
+        return msg;
     }
 }
 
@@ -657,93 +591,74 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
                 0.0  // Initialize scalar multiplier gradient
             );
 
-            auto sockets = new Socket[_numWorkers];
+            // Create queue for each worker
+            auto queues = new JumboMessageQueue[_numWorkers];
+            string[] queueNames;
             auto pids = new pid_t[_numWorkers];
-            string[] socketPaths;
-            
-            // Setup sockets for parallel computation
+
             foreach (i; 0.._numWorkers) {
-                // Create unique socket path with process ID and random component
-                string socketPath = "/tmp/gradient_" ~ thisProcessID().to!string ~ "_" ~ 
-                    randomUUID().toString()[0..8] ~ "_" ~ i.to!string;
-                socketPaths ~= socketPath;
-                auto serverSocket = new Socket(AddressFamily.UNIX, SocketType.STREAM);
-                scope(exit) serverSocket.close();
-                serverSocket.bind(new UnixAddress(socketPath));
-                serverSocket.listen(1);
-                
+                queueNames ~= format("/gradient_%d_%s", 
+                    thisProcessID(), 
+                    randomUUID().toString()[0..8]);
+                queues[i] = new JumboMessageQueue(queueNames[i]);
+            }
+
+            // Spawn worker processes
+            foreach (i; 0.._numWorkers) {
                 pids[i] = fork();
-                if (pids[i] == 0) {  // Child process
-                    serverSocket.close();
+                if (pids[i] == 0) {
+                    auto queue = new JumboMessageQueue(queueNames[i]);
                     
-                    auto socket = new Socket(AddressFamily.UNIX, SocketType.STREAM);
-                    scope(exit) socket.close();
-                    socket.connect(new UnixAddress(socketPath));
-                    
-                    // Process assigned points in parallel
+                    size_t[] indices;
+                    V[] gradients;
                     for (size_t j = i; j < numPoints; j += _numWorkers) {
                         V posGradient = V.zero();
                         
                         // Calculate position gradients
                         foreach (dim; 0..V.dimension) {
                             // Forward difference for position
-                            {
-                                auto pos = current.positions.dup;
-                                pos[j][dim] += _gradientStepSize;
-                                double forward = objective.evaluate(pos, current.multiplier);
+                            auto pos = current.positions.dup;
+                            pos[j][dim] += _gradientStepSize;
+                            double forward = objective.evaluate(pos, current.multiplier);
 
-                                // Backward difference for position
-                                pos[j][dim] -= 2 * _gradientStepSize;
-                                double backward = objective.evaluate(pos, current.multiplier);
+                            // Backward difference for position
+                            pos[j][dim] -= 2 * _gradientStepSize;
+                            double backward = objective.evaluate(pos, current.multiplier);
 
-                                // Central difference
-                                posGradient[dim] = 
-                                    (forward - backward) / (2.0 * _gradientStepSize);
-                            }
+                            // Central difference
+                            posGradient[dim] = 
+                                (forward - backward) / (2.0 * _gradientStepSize);
+
                         }
-                        
-                        // Send result to parent
-                        // Note: multiplier gradient is handled separately
-                        auto msg = GradientMessage!V(j, posGradient, 0.0);
-                        ubyte[] buffer;
-                        msg.serialize(buffer);
-                        auto sent = socket.send(buffer);
-                        if (sent != buffer.length) {
-                            throw new Exception("Failed to send complete gradient message");
-                        }
+                        indices ~= j;
+                        gradients ~= posGradient;
                     }
-                    
+
+                    // Send batch message
+                    auto msg = GradientMessage!V(i, indices, gradients);
+                    ubyte[] buffer;
+                    msg.serialize(buffer);
+                    queue.send(buffer);
                     exit(0);
                 }
-                
-                // Parent process accepts connection
-                sockets[i] = serverSocket.accept();
             }
-            
+
             // Collect results from workers
-            ubyte[] buffer = new ubyte[GradientMessage!V.sizeof];
-            foreach (i; 0..numPoints) {
-                auto bytesReceived = sockets[i % _numWorkers].receive(buffer);
-                if (bytesReceived == GradientMessage!V.sizeof) {
-                    auto msg = GradientMessage!V.deserialize(buffer);
-                    result.positionGradients[msg.index] = msg.positionGradient;
+            foreach (i; 0.._numWorkers) {
+                auto msg = GradientMessage!V.deserialize(
+                    cast(const(ubyte)[])queues[i].receive()
+                );
+                foreach(j, idx; msg.indices) {
+                    result.positionGradients[idx] = msg.positionGradients[j];
                 }
             }
-            
+
             // Cleanup
             scope(exit) {
-                foreach (socket; sockets) {
-                    if (socket !is null) socket.close();
+                foreach (i; 0.._numWorkers) {
+                    if (pids[i] != 0) wait(null);
+                    JumboMessageQueue.cleanup(queueNames[i]);
                 }
-                foreach (path; socketPaths) {
-                    remove(path);
-                }
-            }
-            
-            // Wait for child processes
-            foreach (i; 0.._numWorkers) {
-                int status;
-                wait(&status);
             }
 
             // Calculate multiplier gradient (done in parent process)
