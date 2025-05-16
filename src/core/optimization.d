@@ -75,7 +75,7 @@ class ProcessManager {
             foreach (pid; _pids) {
                 if (pid != 0) {
                     kill(pid, SIGTERM);
-                    // wait(null);  // Wait for each process to exit
+                    wait(null);  // Wait for each process to exit
                 }
             }
         }
@@ -124,59 +124,138 @@ private struct ReplicaConfiguration(V) {
     }
 }
 
-/**
- * Message queue manager for worker communication.
- * Handles creation, connection, and cleanup of JumboMessage queues.
- */
-class WorkerQueueManager(V) {
-    private:
-        JumboMessageQueue[] _queues;
-        string[] _queueNames;
-        size_t _numWorkers;
-        bool _initialized;
+private struct WorkerInput(V) {
+    ReplicaConfiguration!V state;
+    double energy;
+    double temperature;
 
+    ubyte[] toBytes() {
+        ubyte[] buffer;
+
+        // Serialize current state
+        auto stateBytes = state.toBytes();
+        buffer ~= stateBytes;
+
+        // Serialize energy and temperature
+        buffer ~= cast(ubyte[])(&energy)[0..1];
+        buffer ~= cast(ubyte[])(&temperature)[0..1];
+
+        return buffer;
+    }
+
+    static WorkerInput!V fromBytes(ubyte[] data) {
+        size_t offset = 0;
+
+        // Deserialize state
+        auto state = ReplicaConfiguration!V.fromBytes(data);
+        offset += state.toBytes().length;
+
+        // Deserialize energy and temperature
+        double energy = *cast(double*)(data.ptr + offset);
+        offset += double.sizeof;
+
+        double temperature = *cast(double*)(data.ptr + offset);
+
+        return WorkerInput!V(state, energy, temperature);
+    }
+
+    void send(JumboMessageQueue queue) {
+        queue.send(this.toBytes());
+    }
+
+    static WorkerInput!V receive(JumboMessageQueue queue) {
+        return fromBytes(queue.receive());
+    }
+}
+
+private struct WorkerResult(V) {
+    ReplicaConfiguration!V state;
+    double energy;
+
+    ubyte[] toBytes() {
+        ubyte[] buffer;
+        
+        // Serialize state
+        auto stateBytes = state.toBytes();
+        buffer ~= stateBytes;
+
+        // Serialize energy
+        buffer ~= cast(ubyte[])(&energy)[0..1];
+
+        return buffer;
+    }
+
+    static WorkerResult!V fromBytes(ubyte[] data) {
+        size_t offset = 0;
+
+        // Deserialize state
+        auto state = ReplicaConfiguration!V.fromBytes(data);
+        offset += state.toBytes().length;
+
+        // Deserialize energy
+        double energy = *cast(double*)(data.ptr + offset);
+
+        return WorkerResult!V(state, energy);
+    }
+
+    void send(JumboMessageQueue queue) {
+        queue.send(this.toBytes());
+    }
+
+    static WorkerResult!V receive(JumboMessageQueue queue) {
+        return fromBytes(queue.receive());
+    }
+}
+
+/**
+ * Queue manager for parallel tempering communication.
+ * Handles two queues: input queue for workers and results queue from workers.
+ */
+class TemperingQueueManager(V) {
+    private:
+        JumboMessageQueue _inputQueue;
+        JumboMessageQueue _resultsQueue;
+        string _inputQueueName;
+        string _resultsQueueName;
+        
     public:
-        this(size_t numWorkers) {
-            _numWorkers = numWorkers;
-            _queues = new JumboMessageQueue[numWorkers];
-            _queueNames = new string[numWorkers];
-            _initialized = false;
+        this() {
+            _inputQueueName = format("tempering_input_%d_%s",
+                thisProcessID(),
+                randomUUID().toString()[0..8]);
+            _resultsQueueName = format("tempering_results_%d_%s",
+                thisProcessID(),
+                randomUUID().toString()[0..8]);
         }
 
-        void initializeQueues() {
-            if (_initialized) return;
-            
-            foreach (i; 0.._numWorkers) {
-                _queueNames[i] = format("pd_worker_%d_%s_%d",
-                    thisProcessID(),
-                    randomUUID().toString()[0..8],
-                    i);
-                
-                _queues[i] = new JumboMessageQueue(_queueNames[i]);
-            }
-            
-            _initialized = true;
+        void initialize() {
+            _inputQueue = new JumboMessageQueue(_inputQueueName);
+            _resultsQueue = new JumboMessageQueue(_resultsQueueName);
         }
 
         void cleanup() {
-            foreach (queue; _queues) {
-                if (queue !is null) {
-                    JumboMessageQueue.cleanup(queue.name);
-                }
+            if (_inputQueue !is null) {
+                JumboMessageQueue.cleanup(_inputQueueName);
+            }
+            if (_resultsQueue !is null) {
+                JumboMessageQueue.cleanup(_resultsQueueName);
             }
         }
 
-        double receiveEnergy(size_t workerId) {
-            auto data = _queues[workerId].receive();
-            return *cast(double*)data.ptr;
+        string getInputQueueName() {
+            return _inputQueueName;
         }
 
-        string getQueueName(size_t workerId) {
-            return _queueNames[workerId];
+        string getResultsQueueName() {
+            return _resultsQueueName;
         }
 
-        JumboMessageQueue getQueue(size_t workerId) {
-            return _queues[workerId];
+        JumboMessageQueue getInputQueue() {
+            return _inputQueue;
+        }
+
+        JumboMessageQueue getResultsQueue() {
+            return _resultsQueue;
         }
 }
 
@@ -347,48 +426,65 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
             _maxTemperature = maxTemperature;
         }
         
-        // Handle worker process logic
+        // Handle worker process logic - now includes proposal generation and acceptance
         private void handleWorkerProcess(
-            size_t workerId,
-            ObjectiveFunction!(T, V) objective
+            ObjectiveFunction!(T, V) objective,
+            string inputQueueName,
+            string resultsQueueName
         ) {
             try {
-                // Connect to the queue
-                auto queue = new JumboMessageQueue(format("/pd_worker_%d", workerId));
+                // Connect to queues
+                auto inputQueue = new JumboMessageQueue(inputQueueName);
+                auto resultsQueue = new JumboMessageQueue(resultsQueueName);
                 
-                // Process evaluation requests
+                // Process jobs until terminated
                 while (true) {
-                    // Read parameters
-                    ReplicaConfiguration!V job = ReplicaConfiguration!V.receiveJob(queue);
+                    // Get current state and temperature
+                    auto input = WorkerInput!V.receive(inputQueue);
+                    
+                    // Generate proposal with random walk
+                    auto proposedPositions = input.state.positions.dup;
+                    assert(proposedPositions.length > 0);
 
-                    // Evaluate objective and return result
-                    double energy = objective.evaluate(job.positions, job.multiplier);
-                    queue.send(cast(ubyte[])(&energy)[0..1]);
+                    foreach (i, pos; proposedPositions) {
+                        foreach (dim; 0..V.dimension) {
+                            proposedPositions[i][dim] += normal(0, _gradientStepSize);
+                        }
+                    }
+                    
+                    // Generate proposed multiplier
+                    double proposedMultiplier = input.state.multiplier + 
+                        normal(0, _gradientStepSize);
+                        
+                    assert(proposedPositions.length == input.state.positions.length);
+
+                    auto proposedState = ReplicaConfiguration!V(
+                        proposedPositions,
+                        proposedMultiplier
+                    );
+                    
+                    // Evaluate proposal
+                    double proposedEnergy = objective.evaluate(
+                        proposedState.positions,
+                        proposedState.multiplier
+                    );
+                    
+                    // Handle Metropolis acceptance
+                    bool accepted = proposedEnergy <= input.energy || 
+                        uniform01() < exp((input.energy - proposedEnergy) / input.temperature);
+                    
+                    // Return result
+                    WorkerResult!V result;
+                    if (accepted) {
+                        result = WorkerResult!V(proposedState, proposedEnergy);
+                    } else {
+                        result = WorkerResult!V(input.state, input.energy);
+                    }
+                    result.send(resultsQueue);
                 }
             } catch (Exception e) {
-                stderr.writefln("Worker %d error: %s", workerId, e.msg);
+                stderr.writefln("Worker error: %s", e.msg);
             }
-        }
-        
-        // Generate proposal for replica
-        ReplicaConfiguration!V generateProposal(ReplicaConfiguration!V previousReplica) {
-            
-            // Generate proposed positions with random walk
-            auto proposedPositions = previousReplica.positions.dup;
-            foreach (i, pos; proposedPositions) {
-                foreach (dim; 0..V.dimension) {
-                    proposedPositions[i][dim] += normal(0, _gradientStepSize);
-                }
-            }
-            
-            // Generate proposed multiplier
-            double proposedMultiplier = previousReplica.multiplier + 
-                normal(0, _gradientStepSize);
-                
-            return ReplicaConfiguration!V(
-                proposedPositions,
-                proposedMultiplier,
-            );
         }
         
         override OptimizationResult!(T, V) minimize(
@@ -396,30 +492,41 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
             double initialMultiplier,
             ObjectiveFunction!(T, V) objective
         ) {
-            // Initialize managers
-            auto queueManager = new WorkerQueueManager!V(_numProcesses);
+            // Initialize queue manager
+            auto queueManager = new TemperingQueueManager!V();
             scope(exit) queueManager.cleanup();
+
+            // Create worker process manager
             _processManager = new ProcessManager(_numProcesses);
             scope(exit) _processManager.cleanupProcesses();
+
+            // Setup queues
+            queueManager.initialize();
             
-            // Setup queues first
-            queueManager.initializeQueues();
-            
-            // Initialize temperatures
+            // Initialize temperatures and states
             auto replicaTemperatures = initializeTemperatures();
-            auto replicaEnergies = new double[_numReplicas];
-            replicaEnergies[] = double.infinity;
-            
-            auto initialConfig = ReplicaConfiguration!V(
-                initialPositions.dup,
-                initialMultiplier
-            );
             auto replicaConfigurations = new ReplicaConfiguration!V[_numReplicas];
-            replicaConfigurations[] = initialConfig;
+            auto replicaEnergies = new double[_numReplicas];
+            
+            // Initialize all replicas
+            foreach (i; 0.._numReplicas) {
+                replicaConfigurations[i] = ReplicaConfiguration!V(
+                    initialPositions.dup,
+                    initialMultiplier
+                );
+                replicaEnergies[i] = objective.evaluate(
+                    replicaConfigurations[i].positions,
+                    replicaConfigurations[i].multiplier
+                );
+            }
 
             // Spawn workers
             _processManager.spawnWorkers((size_t workerId) {
-                handleWorkerProcess(workerId, objective);
+                handleWorkerProcess(
+                    objective,
+                    queueManager.getInputQueueName(),
+                    queueManager.getResultsQueueName()
+                );
             });
             
             // Track best solution
@@ -431,43 +538,33 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
             
             // Main optimization loop
             for (size_t iter = 0; iter < _maxIterations; ++iter) {
-                ReplicaConfiguration!V[] proposedStates = new ReplicaConfiguration!V[_numReplicas];
-                double[] proposedEnergies = new double[_numReplicas];
-
-                // Assign jobs to all workers
-                foreach (workerId; 0.._numReplicas) {
-                    proposedStates[workerId] = generateProposal(replicaConfigurations[workerId]);
-                    auto queue = queueManager.getQueue(workerId);
-                    proposedStates[workerId].send(queue);
-                }
-
-                // Collect results from all workers
-                foreach (workerId; 0.._numReplicas) {
-                    proposedEnergies[workerId] = queueManager.receiveEnergy(workerId);
-                }
-
-                // Process results
+                // Send current state to workers
                 foreach (i; 0.._numReplicas) {
-                    // Metropolis acceptance
-                    auto proposedEnergy = proposedEnergies[i];
-                    auto proposedConfig = proposedStates[i];
-                    if (proposedEnergy <= replicaEnergies[i] || 
-                        uniform01() < exp((replicaEnergies[i] - proposedEnergy) / replicaTemperatures[i])) {
-                        // Accept proposal
-                        replicaConfigurations[i] = proposedConfig;
-                        replicaEnergies[i] = proposedEnergy;
-                        
-                        // Update best solution if needed
-                        if (proposedEnergy < best.energy) {
-                            best.energy = proposedEnergy;
-                            best.positions = proposedConfig.positions;
-                            best.multiplier = proposedConfig.multiplier;
-                        }
-                    }
+                    auto input = WorkerInput!V(
+                        replicaConfigurations[i],
+                        replicaEnergies[i],
+                        replicaTemperatures[i]
+                    );
+                    input.send(queueManager.getInputQueue());
+                }
 
+                // Collect results
+                foreach (i; 0.._numReplicas) {
+                    auto result = WorkerResult!V.receive(queueManager.getResultsQueue());
+                    
+                    // Update replica state
+                    replicaConfigurations[i] = result.state;
+                    replicaEnergies[i] = result.energy;
+                    
+                    // Update best solution if needed
+                    if (result.energy < best.energy) {
+                        best.energy = result.energy;
+                        best.positions = result.state.positions.dup;
+                        best.multiplier = result.state.multiplier;
+                    }
                 }
                 
-                // Reorder temperatures based on energies
+                // Reorder temperatures
                 replicaTemperatures = reorderTemperatures(replicaTemperatures, replicaEnergies);
             }
             
