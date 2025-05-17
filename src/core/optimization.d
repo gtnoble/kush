@@ -567,6 +567,10 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
                 // Reorder temperatures
                 replicaTemperatures = reorderTemperatures(replicaTemperatures, replicaEnergies);
             }
+
+            debug {
+                writefln("Best energy: %s", best.energy);
+            }
             
             return OptimizationResult!(T, V)(best.positions, best.multiplier);
         }
@@ -586,50 +590,58 @@ enum GradientUpdateMode {
 private struct GradientMessage(V) {
     size_t workerId;          // Worker identifier
     size_t[] indices;         // Point indices
-    V[] positionGradients;   // Array of gradients
+    V[] positionGradients;    // Array of gradients
 
-    // Calculate serialized size
-    size_t getSize() const {
-        return 2*size_t.sizeof +            // workerId + array length
-               indices.length * size_t.sizeof +
-               positionGradients.length * V.sizeof;
-    }
-
-    void serialize(ref ubyte[] buffer) const {
+    ubyte[] toBytes() {
         enforce(indices.length == positionGradients.length, 
-               "Mismatched array lengths");
-               
-        auto oldLen = buffer.length;
-        buffer.length = oldLen + this.getSize();
-        auto ptr = buffer.ptr + oldLen;
+            "Mismatched array lengths");
+            
+        ubyte[] buffer;
+
+        // Serialize workerId
+        buffer ~= cast(ubyte[])(&workerId)[0..1];
         
-        // Serialize metadata
-        (cast(size_t*)ptr)[0] = workerId;
-        (cast(size_t*)ptr)[1] = indices.length;
-        ptr += 2*size_t.sizeof;
+        // Serialize indices array
+        size_t indicesSize = indices.length;
+        buffer ~= cast(ubyte[])(&indicesSize)[0..1];
+        buffer ~= cast(ubyte[])indices[];
         
-        // Serialize arrays
-        ptr[0..indices.length*size_t.sizeof] = cast(ubyte[])indices[];
-        ptr += indices.length*size_t.sizeof;
+        // Serialize position gradients array
+        size_t gradientsSize = positionGradients.length;
+        buffer ~= cast(ubyte[])(&gradientsSize)[0..1];
+        buffer ~= cast(ubyte[])positionGradients[];
         
-        ptr[0..positionGradients.length*V.sizeof] = cast(ubyte[])positionGradients[];
+        return buffer;
     }
 
-    static GradientMessage!V deserialize(const(ubyte)[] buffer) {
-        enforce(buffer.length >= 2*size_t.sizeof, "Buffer too small");
-        auto ptr = buffer.ptr;
-        
+    static GradientMessage!V fromBytes(ubyte[] data) {
+        size_t offset = 0;
         GradientMessage!V msg;
-        msg.workerId = (cast(const size_t*)ptr)[0];
-        size_t count = (cast(const size_t*)ptr)[1];
-        ptr += 2*size_t.sizeof;
         
-        // Deserialize arrays
-        msg.indices = (cast(size_t*)ptr)[0..count];
-        ptr += count*size_t.sizeof;
+        // Deserialize workerId
+        msg.workerId = *cast(size_t*)(data.ptr + offset);
+        offset += size_t.sizeof;
         
-        msg.positionGradients = (cast(V*)ptr)[0..count];
+        // Deserialize indices array
+        size_t indicesSize = *cast(size_t*)(data.ptr + offset);
+        offset += size_t.sizeof;
+        msg.indices = (cast(size_t*)(data.ptr + offset))[0..indicesSize].dup;
+        offset += indicesSize * size_t.sizeof;
+        
+        // Deserialize position gradients array
+        size_t gradientsSize = *cast(size_t*)(data.ptr + offset);
+        offset += size_t.sizeof;
+        msg.positionGradients = (cast(V*)(data.ptr + offset))[0..gradientsSize].dup;
+        
         return msg;
+    }
+
+    void send(JumboMessageQueue queue) {
+        queue.send(this.toBytes());
+    }
+
+    static GradientMessage!V receive(JumboMessageQueue queue) {
+        return fromBytes(queue.receive());
     }
 }
 
@@ -733,18 +745,14 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
 
                     // Send batch message
                     auto msg = GradientMessage!V(i, indices, gradients);
-                    ubyte[] buffer;
-                    msg.serialize(buffer);
-                    queue.send(buffer);
+                    msg.send(queue);
                     exit(0);
                 }
             }
 
             // Collect results from workers
             foreach (i; 0.._numWorkers) {
-                auto msg = GradientMessage!V.deserialize(
-                    cast(const(ubyte)[])queues[i].receive()
-                );
+                auto msg = GradientMessage!V.receive(queues[i]);
                 foreach(j, idx; msg.indices) {
                     result.positionGradients[idx] = msg.positionGradients[j];
                 }
@@ -870,11 +878,15 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
                 
                 // Evaluate current state
                 currentValue = objective.evaluate(state.positions, state.multiplier);
-                
+
                 // Check convergence
                 if (abs(currentValue - previousValue) < _tolerance) {
                     break;
                 }
+            }
+                
+            debug {
+                writefln("Best energy: %s", currentValue);
             }
             
             return OptimizationResult!(T, V)(state.positions, state.multiplier);
