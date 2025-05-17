@@ -21,7 +21,6 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
     private bool _isVelocityFixed;  // Whether velocity updates are disabled
     private V _constantForce;  // Store constant external force
     private double _timeElapsed;      // Track simulation time
-    private V _targetForce;          // Final force magnitude
     private VelocityConstraint!V* _velocityConstraint;  // Velocity constraint (pointer to allow null checks)
     private double _rampDuration;     // Time to reach target force
 
@@ -55,7 +54,7 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
         Damper!V damper,               // Damping strategy
         V initialVelocity = V.zero(),
         bool fixedVelocity = false,
-        V targetForce = V.zero(),     // Target force at end of ramp (already scaled by point count)
+        V constantForce = V.zero(),     // Target force at end of ramp (already scaled by point count)
         double rampDuration = 1e-6    // Duration of force ramp (default 1μs)
     ) {
         _referencePosition = refPos;
@@ -66,33 +65,11 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
         _criticalStretch = criticalStretch;
         _damper = damper;
         _isVelocityFixed = fixedVelocity;
-        _targetForce = targetForce;
         _rampDuration = rampDuration;
         _timeElapsed = 0.0;
-        _constantForce = V.zero();  // Start with zero force
+        _constantForce = constantForce;  // Start with zero force
     }
 
-    // Force property accessors
-    @property V targetForce() const {
-        return _targetForce;
-    }
-
-    @property void targetForce(V force) {
-        _targetForce = force;
-    }
-
-    @property double rampDuration() const {
-        return _rampDuration;
-    }
-
-    @property void rampDuration(double duration) {
-        _rampDuration = duration;
-    }
-
-    @property V currentForce() const {
-        return _constantForce;
-    }
-    
     // Lagrangian calculation
     double computeLagrangian(const(BondBasedPoint!V)[] neighbors, V proposedPosition, double timeStep) const {
         // Kinetic energy T = (1/2)m((x2-x1)/dt)^2
@@ -114,10 +91,10 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
             
             // Bond energy if not broken
             if (abs(stretch) <= _criticalStretch) {
-                potentialEnergy += 0.5 * _bondStiffness * stretch * stretch;
+                potentialEnergy += -0.5 * _bondStiffness * stretch * stretch;
             }
             else {
-                potentialEnergy += 0.5 * _bondStiffness * _criticalStretch * _criticalStretch; // Energy at critical stretch
+                potentialEnergy += -0.5 * _bondStiffness * _criticalStretch * _criticalStretch; // Energy at critical stretch
             }
         }
         
@@ -177,8 +154,8 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
             return V.zero();
         }
         
-        // Bond force calculation using displacement direction
-        V forceDirection = displacement.unit();  // Unit vector in direction of deformation
+        // Bond force calculation
+        V forceDirection = -displacement.unit();  // Unit vector opposing displacement
         V elasticForce = forceDirection * (_bondStiffness * stretch);
         
         // Add bond damping only during compression
@@ -191,24 +168,5 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
         }
         
         return elasticForce;
-    }
-    
-    // Calculate total force on point
-    private V calculateTotalForce(const(BondBasedPoint!V)[] neighbors) {
-        // Calculate elastic force from bonds
-        V elasticForce = V.zero();
-        foreach (neighbor; neighbors) {
-            elasticForce = elasticForce + bondForce(neighbor);
-        }
-        
-        // Add global damping force
-        V dampingForce = _damper.calculateGlobalForce(_velocity, _mass);
-        
-        // Update ramped force
-        double rampFactor = _timeElapsed / _rampDuration;
-        if (rampFactor > 1.0) rampFactor = 1.0;  // Clamp at maximum
-        _constantForce = _targetForce * rampFactor;  // Linear interpolation
-        
-        return elasticForce + dampingForce + _constantForce;
     }
 }
