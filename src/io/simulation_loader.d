@@ -8,18 +8,55 @@ import std.exception : enforce;
 import std.format : format;
 import std.file : readText;
 
+/// Step size configuration with optional horizon-based scaling
+struct StepSize {
+    double value = 1e-4;
+    double horizon_fraction;  // Optional: if specified, step = horizon * fraction
+
+    double getEffectiveValue(double horizon) const {
+        if (horizon_fraction > 0.0) {
+            return horizon * horizon_fraction;
+        }
+        return value;
+    }
+}
+
 /// Parameters for gradient descent optimization
 struct GradientDescent {
     double momentum = 0.9;
-    string gradient_mode = "step_size";  // "step_size" or "learning_rate"
-    double learning_rate = 0.01;
+    string gradient_mode = "step_size";  // "step_size", "learning_rate", "bb1", "bb2", or "bb-auto"
+    double learning_rate = 0.01;         // Used in learning_rate mode
     double finite_difference_step = 1e-6;  // Step size for numerical derivatives
     
-    struct GradientStepSize {
-        double value = 1e-4;
-        double horizon_fraction;  // Optional: if specified, step = horizon * fraction
+    StepSize initial_step;     // Initial step size for all modes
+    StepSize min_step;         // Minimum allowed step size
+    StepSize max_step;         // Maximum allowed step size
+    StepSize gradient_step_size;  // Step size for gradient mode
+
+    /// Get effective initial step size
+    double getEffectiveInitialStep(double horizon) const {
+        return initial_step.getEffectiveValue(horizon);
     }
-    GradientStepSize gradient_step_size;
+    
+    /// Get effective minimum step size
+    double getEffectiveMinStep(double horizon) const {
+        return min_step.getEffectiveValue(horizon);
+    }
+    
+    /// Get effective maximum step size
+    double getEffectiveMaxStep(double horizon) const {
+        return max_step.getEffectiveValue(horizon);
+    }
+
+    /// Get effective gradient step size
+    double getEffectiveGradientStep(double horizon) const {
+        return gradient_step_size.getEffectiveValue(horizon);
+    }
+
+    /// Check if mode is Barzilai-Borwein variant
+    bool isBarzilaiborweinMode() const {
+        return gradient_mode == "bb1" || gradient_mode == "bb2" || gradient_mode == "bb-auto";
+    }
 }
 
 /// Parameters for optimization
@@ -167,8 +204,11 @@ private OptimizationConfig parseOptimizationConfig(JSONValue json) {
         if ("gradient_mode" in gd) {
             config.gradient_descent.gradient_mode = gd["gradient_mode"].get!string;
             enforce(config.gradient_descent.gradient_mode == "step_size" || 
-                   config.gradient_descent.gradient_mode == "learning_rate",
-                "Gradient mode must be either 'step_size' or 'learning_rate'");
+                   config.gradient_descent.gradient_mode == "learning_rate" ||
+                   config.gradient_descent.gradient_mode == "bb1" ||
+                   config.gradient_descent.gradient_mode == "bb2" ||
+                   config.gradient_descent.gradient_mode == "bb-auto",
+                "Gradient mode must be one of: step_size, learning_rate, bb1, bb2, bb-auto");
         }
 
         if ("learning_rate" in gd) {
@@ -183,20 +223,26 @@ private OptimizationConfig parseOptimizationConfig(JSONValue json) {
                 "Finite difference step must be positive");
         }
 
-        if ("gradient_step_size" in gd) {
-            auto step = gd["gradient_step_size"];
-            if ("value" in step) {
-                config.gradient_descent.gradient_step_size.value = step["value"].get!double;
-                enforce(config.gradient_descent.gradient_step_size.value > 0.0,
-                    "Gradient step size value must be positive");
-            }
-            if ("horizon_fraction" in step) {
-                config.gradient_descent.gradient_step_size.horizon_fraction =
-                    step["horizon_fraction"].get!double;
-                enforce(config.gradient_descent.gradient_step_size.horizon_fraction > 0.0,
-                    "Horizon fraction must be positive");
+        // Parse step sizes
+        void parseStepSize(string field, ref StepSize stepSize) {
+            if (field in gd) {
+                auto step = gd[field];
+                if ("value" in step) {
+                    stepSize.value = step["value"].get!double;
+                    //enforce(stepSize.value > 0.0, field ~ " value must be positive");
+                }
+                if ("horizon_fraction" in step) {
+                    stepSize.horizon_fraction = step["horizon_fraction"].get!double;
+                    enforce(stepSize.horizon_fraction > 0.0, 
+                        field ~ " horizon fraction must be positive");
+                }
             }
         }
+
+        parseStepSize("initial_step", config.gradient_descent.initial_step);
+        parseStepSize("min_step", config.gradient_descent.min_step);
+        parseStepSize("max_step", config.gradient_descent.max_step);
+        parseStepSize("gradient_step_size", config.gradient_descent.gradient_step_size);
     }
 
     if ("parallel_tempering" in json) {

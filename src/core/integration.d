@@ -29,16 +29,16 @@ class SystemLagrangian(T, V) : ObjectiveFunction!(T, V) if (isMaterialPoint!(T, 
             }
         }
         
-        double evaluate(V[] proposedPositions, double multiplier = 0.0) {
+        override double evaluate(OptimizationState!V state) {
             double totalLagrangian = 0.0;
             
             T[] neighbors;
-            // Calculate proposed velocities
+            // Calculate proposed velocities from state
             for (size_t i = 0; i < _body.numPoints; ++i) {
-                _proposedVelocities[i] = (proposedPositions[i] - _currentPositions[i]) / _timeStep;
+                _proposedVelocities[i] = (state.positions[i] - _currentPositions[i]) / _timeStep;
             }
             
-            // For each point, compute its contribution to the system Lagrangian
+            // For each point, compute its contribution
             for (size_t i = 0; i < _body.numPoints; ++i) {
                 auto point = _body[i];
                 _body.neighbors(i, neighbors);
@@ -46,7 +46,7 @@ class SystemLagrangian(T, V) : ObjectiveFunction!(T, V) if (isMaterialPoint!(T, 
                 // Compute regular Lagrangian
                 totalLagrangian += point.computeLagrangian(
                     neighbors, 
-                    proposedPositions[i], 
+                    state.positions[i], 
                     _timeStep
                 );
             }
@@ -57,9 +57,7 @@ class SystemLagrangian(T, V) : ObjectiveFunction!(T, V) if (isMaterialPoint!(T, 
                 _proposedVelocities
             );
             
-            return totalLagrangian - multiplier * constraintViolation;
-            //return totalLagrangian + 1e12 * constraintViolation;
-            //return totalLagrangian;
+            return totalLagrangian - state.multiplier * constraintViolation;
         }
 }
 
@@ -98,9 +96,12 @@ class LagrangianIntegrator(T, V) {
             }
             double averageMass = totalMass / count;
             
+            // Create initial state combining positions and multiplier
+            auto initialState = OptimizationState!V(currentPositions, averageMass);
+            
+            // Call minimize with unified state
             auto result = _solver.minimize(
-                currentPositions,
-                averageMass,  // Use average mass as multiplier
+                initialState,
                 objective
             );
             

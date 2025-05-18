@@ -3,7 +3,7 @@ module core.optimization;
 import core.material_point;
 import math.vector;
 import std.math : abs, sqrt, exp;
-import std.algorithm.comparison : min;
+import std.algorithm : min, max;
 import core.thread : Thread;
 import core.time : dur;
 import std.array;
@@ -81,11 +81,130 @@ class ProcessManager {
         }
 }
 
-private struct ReplicaConfiguration(V) {
-    V[] positions;  // Current positions of the replica
+/// Unified state type that encapsulates both positions and multiplier
+struct OptimizationState(V) {
+    V[] positions;  // Current positions
     double multiplier;  // Scalar multiplier for velocity constraints
 
-    ubyte[] toBytes() {
+    // Total number of scalar components (positions * V.dimension + 1 multiplier)
+    size_t numComponents() const {
+        return positions.length * V.dimension + 1;
+    }
+
+    // Get component by linear index
+    double opIndex(size_t index) const {
+        if (index < positions.length * V.dimension) {
+            size_t pointIndex = index / V.dimension;
+            size_t dimIndex = index % V.dimension;
+            return positions[pointIndex][dimIndex];
+        }
+        return multiplier;
+    }
+
+    // Set component by linear index
+    double opIndexOpAssign(string op)(double value, size_t index)
+        if (op == "+" || op == "-" || op == "*" || op == "/")
+    {
+        if (index < positions.length * V.dimension) {
+            size_t pointIndex = index / V.dimension;
+            size_t dimIndex = index % V.dimension;
+            static if (op == "+") 
+                positions[pointIndex][dimIndex] += value;
+            else static if (op == "-") 
+                positions[pointIndex][dimIndex] -= value;
+            else static if (op == "*") 
+                positions[pointIndex][dimIndex] *= value;
+            else static if (op == "/") 
+                positions[pointIndex][dimIndex] /= value;
+        } else {
+            static if (op == "+") 
+                multiplier += value;
+            else static if (op == "-") 
+                multiplier -= value;
+            else static if (op == "*") 
+                multiplier *= value;
+            else static if (op == "/") 
+                multiplier /= value;
+        }
+        return opIndex(index);
+    }
+
+    // Basic assignment
+    double opIndexAssign(double value, size_t index) {
+        if (index < positions.length * V.dimension) {
+            size_t pointIndex = index / V.dimension;
+            size_t dimIndex = index % V.dimension;
+            positions[pointIndex][dimIndex] = value;
+        } else {
+            multiplier = value;
+        }
+        return value;
+    }
+
+    this(V[] pos, double mult = 0.0) {
+        positions = pos;
+        multiplier = mult;
+    }
+
+    OptimizationState!V dup() const {
+        return OptimizationState!V(positions.dup, multiplier);
+    }
+
+    OptimizationState!V opBinary(string op)(const OptimizationState!V other) const
+        if (op == "+" || op == "-")
+    {
+        assert(numComponents == other.numComponents, "Dimension mismatch");
+        auto result = OptimizationState!V(new V[positions.length]);
+        static if (op == "+") {
+            foreach (i; 0..positions.length) {
+                result.positions[i] = positions[i] + other.positions[i];
+            }
+            result.multiplier = multiplier + other.multiplier;
+        } else static if (op == "-") {
+            foreach (i; 0..positions.length) {
+                result.positions[i] = positions[i] - other.positions[i];
+            }
+            result.multiplier = multiplier - other.multiplier;
+        }
+        return result;
+    }
+
+    OptimizationState!V opBinary(string op)(double scalar) const
+        if (op == "*" || op == "/")
+    {
+        auto result = OptimizationState!V(new V[positions.length]);
+        static if (op == "*") {
+            foreach (i; 0..positions.length) {
+                result.positions[i] = positions[i] * scalar;
+            }
+            result.multiplier = multiplier * scalar;
+        } else static if (op == "/") {
+            foreach (i; 0..positions.length) {
+                result.positions[i] = positions[i] / scalar;
+            }
+            result.multiplier = multiplier / scalar;
+        }
+        return result;
+    }
+
+    double magnitudeSquared() const {
+        double total = multiplier * multiplier;  // Include multiplier in magnitude
+        foreach (pos; positions) {
+            total += pos.magnitudeSquared();
+        }
+        return total;
+    }
+
+    static OptimizationState!V zero(size_t numPositions) {
+        auto result = OptimizationState!V(new V[numPositions]);
+        foreach (ref pos; result.positions) {
+            pos = V.zero();
+        }
+        result.multiplier = 0.0;
+        return result;
+    }
+
+    ubyte[] toBytes() const {
         ubyte[] buffer;
         buffer ~= cast(ubyte[])(&multiplier)[0..1];
         
@@ -97,35 +216,38 @@ private struct ReplicaConfiguration(V) {
         return buffer;
     }
 
-    void send(JumboMessageQueue queue) {
+    void send(JumboMessageQueue queue) const {
         queue.send(this.toBytes());
     }
         
-    static ReplicaConfiguration!V fromBytes(ubyte[] data) {
-        ReplicaConfiguration!V job;
+    static OptimizationState!V fromBytes(ubyte[] data) {
+        OptimizationState!V state;
         size_t offset = 0;
         
         // Deserialize multiplier
-        job.multiplier = *cast(double*)(data.ptr + offset);
+        state.multiplier = *cast(double*)(data.ptr + offset);
         offset += double.sizeof;
         
         // Deserialize positions array size and data
         size_t size = *cast(size_t*)(data.ptr + offset);
         offset += size_t.sizeof;
         
-        job.positions = new V[size];
-        job.positions[] = cast(V[])(data[offset..offset + V.sizeof * size])[];
+        state.positions = new V[size];
+        state.positions[] = cast(V[])(data[offset..offset + V.sizeof * size])[];
         
-        return job;
+        return state;
     }
 
-    static receiveJob(JumboMessageQueue queue) {
+    static OptimizationState!V receive(JumboMessageQueue queue) {
         return fromBytes(queue.receive());
     }
 }
 
+// Replica configuration now uses the unified state type
+private alias ReplicaConfiguration(V) = OptimizationState!V;
+
 private struct WorkerInput(V) {
-    ReplicaConfiguration!V state;
+    OptimizationState!V state;
     double energy;
     double temperature;
 
@@ -147,7 +269,7 @@ private struct WorkerInput(V) {
         size_t offset = 0;
 
         // Deserialize state
-        auto state = ReplicaConfiguration!V.fromBytes(data);
+        auto state = OptimizationState!V.fromBytes(data);
         offset += state.toBytes().length;
 
         // Deserialize energy and temperature
@@ -169,7 +291,7 @@ private struct WorkerInput(V) {
 }
 
 private struct WorkerResult(V) {
-    ReplicaConfiguration!V state;
+    OptimizationState!V state;
     double energy;
 
     ubyte[] toBytes() {
@@ -189,7 +311,7 @@ private struct WorkerResult(V) {
         size_t offset = 0;
 
         // Deserialize state
-        auto state = ReplicaConfiguration!V.fromBytes(data);
+        auto state = OptimizationState!V.fromBytes(data);
         offset += state.toBytes().length;
 
         // Deserialize energy
@@ -277,16 +399,31 @@ OptimizationSolver!(T, V) createOptimizer(T, V)(
     const OptimizationConfig config, double horizon
 ) if (isMaterialPoint!(T, V)) {
     if (config.solver_type == "gradient_descent") {
-        auto mode = config.gradient_descent.gradient_mode == "learning_rate" ?
-            GradientUpdateMode.LearningRate : GradientUpdateMode.StepSize;
+        GradientUpdateMode mode;
+        if (config.gradient_descent.gradient_mode == "learning_rate")
+            mode = GradientUpdateMode.LearningRate;
+        else if (config.gradient_descent.gradient_mode == "step_size")
+            mode = GradientUpdateMode.StepSize;
+        else if (config.gradient_descent.gradient_mode == "bb1")
+            mode = GradientUpdateMode.BB1;
+        else if (config.gradient_descent.gradient_mode == "bb2")
+            mode = GradientUpdateMode.BB2;
+        else if (config.gradient_descent.gradient_mode == "bb-auto")
+            mode = GradientUpdateMode.BBAuto;
+        else
+            throw new Exception("Invalid gradient mode: " ~ config.gradient_descent.gradient_mode);
+
         return new GradientDescentSolver!(T, V)(
             config.tolerance,
             config.max_iterations,
             config.gradient_descent.learning_rate,
-            config.getEffectiveStepSize(horizon),
+            config.gradient_descent.getEffectiveGradientStep(horizon),
             mode,
             config.gradient_descent.momentum,
-            config.gradient_descent.finite_difference_step
+            config.gradient_descent.finite_difference_step,
+            config.gradient_descent.getEffectiveInitialStep(horizon),
+            config.gradient_descent.getEffectiveMinStep(horizon),
+            config.gradient_descent.getEffectiveMaxStep(horizon)
         );
     } else if (config.solver_type == "parallel_tempering") {
         return new ParallelTemperingSolver!(T, V)(
@@ -305,8 +442,8 @@ OptimizationSolver!(T, V) createOptimizer(T, V)(
 
 // Interface for optimization objective functions
 interface ObjectiveFunction(T, V) if (isMaterialPoint!(T, V)) {
-    // Evaluate objective function with positions and scalar multiplier
-    double evaluate(V[] positions, double multiplier = 0.0);
+    // Evaluate objective function with unified state
+    double evaluate(OptimizationState!V state);
 }
 
 // Base class for optimization-based solvers
@@ -323,8 +460,7 @@ abstract class OptimizationSolver(T, V) if (isMaterialPoint!(T, V)) {
         
         // Core optimization method to be implemented by concrete solvers
         abstract OptimizationResult!(T, V) minimize(
-            V[] initialPositions,
-            double initialMultiplier,
+            OptimizationState!V initialState,
             ObjectiveFunction!(T, V) objective
         );
 }
@@ -363,13 +499,11 @@ abstract class OptimizationSolver(T, V) if (isMaterialPoint!(T, V)) {
 class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
     private:
         static struct BestSolution(V) {
-            V[] positions;
-            double multiplier;
+            OptimizationState!V state;
             double energy = double.infinity;
 
-            this(V[] pos, double mult, double e = double.infinity) {
-                positions = pos.dup;
-                multiplier = mult;
+            this(OptimizationState!V s, double e = double.infinity) {
+                state = s.dup();
                 energy = e;
             }
         }
@@ -451,31 +585,13 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
                     auto input = WorkerInput!V.receive(inputQueue);
                     
                     // Generate proposal with random walk
-                    auto proposedPositions = input.state.positions.dup;
-                    assert(proposedPositions.length > 0);
-
-                    foreach (i, pos; proposedPositions) {
-            foreach (dim; 0..V.dimension) {
-                proposedPositions[i][dim] += normal(0, _proposalStepSize);
-                        }
+                    auto proposedState = input.state.dup();
+                    foreach (i; 0..proposedState.numComponents) {
+                        proposedState[i] += normal(0, _proposalStepSize);
                     }
                     
-                    // Generate proposed multiplier
-                    double proposedMultiplier = input.state.multiplier + 
-                        normal(0, _proposalStepSize);
-                        
-                    assert(proposedPositions.length == input.state.positions.length);
-
-                    auto proposedState = ReplicaConfiguration!V(
-                        proposedPositions,
-                        proposedMultiplier
-                    );
-                    
                     // Evaluate proposal
-                    double proposedEnergy = objective.evaluate(
-                        proposedState.positions,
-                        proposedState.multiplier
-                    );
+                    double proposedEnergy = objective.evaluate(proposedState);
                     
                     // Handle Metropolis acceptance
                     bool accepted = proposedEnergy <= input.energy || 
@@ -496,8 +612,7 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
         }
         
         override OptimizationResult!(T, V) minimize(
-            V[] initialPositions,
-            double initialMultiplier,
+            OptimizationState!V initialState,
             ObjectiveFunction!(T, V) objective
         ) {
             // Initialize queue manager
@@ -518,14 +633,8 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
             
             // Initialize all replicas
             foreach (i; 0.._numReplicas) {
-                replicaConfigurations[i] = ReplicaConfiguration!V(
-                    initialPositions.dup,
-                    initialMultiplier
-                );
-                replicaEnergies[i] = objective.evaluate(
-                    replicaConfigurations[i].positions,
-                    replicaConfigurations[i].multiplier
-                );
+                replicaConfigurations[i] = initialState.dup;
+                replicaEnergies[i] = objective.evaluate(replicaConfigurations[i]);
             }
 
             // Spawn workers
@@ -538,11 +647,7 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
             });
             
             // Track best solution
-            auto best = BestSolution!V(
-                initialPositions.dup,
-                initialMultiplier,
-                double.infinity
-            );
+            auto best = BestSolution!V(initialState.dup, double.infinity);
             
             // Main optimization loop
             for (size_t iter = 0; iter < _maxIterations; ++iter) {
@@ -566,9 +671,7 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
                     
                     // Update best solution if needed
                     if (result.energy < best.energy) {
-                        best.energy = result.energy;
-                        best.positions = result.state.positions.dup;
-                        best.multiplier = result.state.multiplier;
+                        best = BestSolution!V(result.state, result.energy);
                     }
                 }
                 
@@ -580,7 +683,7 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
                 writefln("Best energy: %s", best.energy);
             }
             
-            return OptimizationResult!(T, V)(best.positions, best.multiplier);
+            return OptimizationResult!(T, V)(best.state.positions, best.state.multiplier);
         }
 }
 
@@ -588,58 +691,43 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
  * Update modes for gradient descent optimization:
  * - LearningRate: Scale gradient by learning rate (traditional gradient descent)
  * - StepSize: Move fixed distance in gradient direction (normalized gradient)
+ * - BB1: Barzilai-Borwein method 1 (s^T y / y^T y)
+ * - BB2: Barzilai-Borwein method 2 (s^T s / s^T y)
+ * - BBAuto: Automatic selection between BB1 and BB2
  */
 enum GradientUpdateMode {
     LearningRate,  // Scale gradient by learning rate
-    StepSize       // Move fixed step size in gradient direction
+    StepSize,      // Move fixed step size in gradient direction
+    BB1,           // Barzilai-Borwein method 1
+    BB2,           // Barzilai-Borwein method 2
+    BBAuto         // Automatic BB method selection
 }
 
-// Gradient message for parallel computation
-private struct GradientMessage(V) {
+// Gradient message for parallel computation - one component at a time
+private struct GradientMessage {
     size_t workerId;          // Worker identifier
-    size_t[] indices;         // Point indices
-    V[] positionGradients;    // Array of gradients
+    size_t index;            // Component index in optimization state
+    double value;            // Gradient value for this component
 
     ubyte[] toBytes() {
-        enforce(indices.length == positionGradients.length, 
-            "Mismatched array lengths");
-            
         ubyte[] buffer;
-
-        // Serialize workerId
         buffer ~= cast(ubyte[])(&workerId)[0..1];
-        
-        // Serialize indices array
-        size_t indicesSize = indices.length;
-        buffer ~= cast(ubyte[])(&indicesSize)[0..1];
-        buffer ~= cast(ubyte[])indices[];
-        
-        // Serialize position gradients array
-        size_t gradientsSize = positionGradients.length;
-        buffer ~= cast(ubyte[])(&gradientsSize)[0..1];
-        buffer ~= cast(ubyte[])positionGradients[];
-        
+        buffer ~= cast(ubyte[])(&index)[0..1];
+        buffer ~= cast(ubyte[])(&value)[0..1];
         return buffer;
     }
 
-    static GradientMessage!V fromBytes(ubyte[] data) {
+    static GradientMessage fromBytes(ubyte[] data) {
+        GradientMessage msg;
         size_t offset = 0;
-        GradientMessage!V msg;
         
-        // Deserialize workerId
         msg.workerId = *cast(size_t*)(data.ptr + offset);
         offset += size_t.sizeof;
         
-        // Deserialize indices array
-        size_t indicesSize = *cast(size_t*)(data.ptr + offset);
+        msg.index = *cast(size_t*)(data.ptr + offset);
         offset += size_t.sizeof;
-        msg.indices = (cast(size_t*)(data.ptr + offset))[0..indicesSize].dup;
-        offset += indicesSize * size_t.sizeof;
         
-        // Deserialize position gradients array
-        size_t gradientsSize = *cast(size_t*)(data.ptr + offset);
-        offset += size_t.sizeof;
-        msg.positionGradients = (cast(V*)(data.ptr + offset))[0..gradientsSize].dup;
+        msg.value = *cast(double*)(data.ptr + offset);
         
         return msg;
     }
@@ -648,7 +736,7 @@ private struct GradientMessage(V) {
         queue.send(this.toBytes());
     }
 
-    static GradientMessage!V receive(JumboMessageQueue queue) {
+    static GradientMessage receive(JumboMessageQueue queue) {
         return fromBytes(queue.receive());
     }
 }
@@ -659,7 +747,10 @@ private struct GradientMessage(V) {
  * Features:
  * - Momentum-based updates for faster convergence
  * - Parallel gradient computation across multiple processes
- * - Support for both learning rate and step size modes
+ * - Support for multiple gradient update modes:
+ *   - Learning rate mode (traditional gradient descent)
+ *   - Fixed step size mode (normalized gradient)
+ *   - Barzilai-Borwein methods (adaptive step size)
  * - Automatic gradient normalization
  * 
  * Configuration in JSON:
@@ -669,180 +760,168 @@ private struct GradientMessage(V) {
  *   "max_iterations": 1000,
  *   "gradient_descent": {
  *     "momentum": 0.9,
- *     "gradient_mode": "step_size",  // or "learning_rate"
+ *     "gradient_mode": "step_size",  // "step_size", "learning_rate", "bb1", "bb2", "bb-auto"
  *     "learning_rate": 0.01,  // Used if mode is "learning_rate"
  *     "finite_difference_step": 1e-6,  // Step size for numerical derivatives
- *     "gradient_step_size": {
+ *     
+ *     // Step size configurations (all support horizon_fraction)
+ *     "initial_step": {  // Initial step size for BB methods
  *       "value": 1e-4,
- *       "horizon_fraction": 0.0001  // Optional: step = horizon * fraction
+ *       "horizon_fraction": 0.001
+ *     },
+ *     "min_step": {  // Minimum allowed step size
+ *       "value": 1e-10,
+ *       "horizon_fraction": 0.00001
+ *     },
+ *     "max_step": {  // Maximum allowed step size
+ *       "value": 1e-2,
+ *       "horizon_fraction": 0.01
+ *     },
+ *     "gradient_step_size": {  // Step size for fixed step mode
+ *       "value": 1e-4,
+ *       "horizon_fraction": 0.0001
  *     }
  *   }
  * }
+ *
+ * Barzilai-Borwein Methods:
+ * - BB1: Uses step size α_k = (s_{k-1}^T y_{k-1}) / (y_{k-1}^T y_{k-1})
+ * - BB2: Uses step size α_k = (s_{k-1}^T s_{k-1}) / (s_{k-1}^T y_{k-1})
+ * - BB-Auto: Automatically switches between BB1 and BB2 based on convergence behavior
+ *   - Uses BB2 when oscillating (s^T y < 0)
+ *   - Uses BB1 otherwise (s^T y ≥ 0)
+ * where:
+ * - s_{k-1} = x_k - x_{k-1} (change in position)
+ * - y_{k-1} = g_k - g_{k-1} (change in gradient)
  */
 class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
     private:
         double _learningRate = 0.01;
         double _stepSize = 0.01;
+        double _initialStep = 0.01;
+        double _minStep = 1e-10;
+        double _maxStep = 1.0;
         double _momentum = 0.9;
         GradientUpdateMode _updateMode = GradientUpdateMode.LearningRate;
         double _finiteDifferenceStep = 1e-6;
         size_t _numWorkers;  // Number of worker processes for gradient calculation
 
-        struct OptimizationState {
-            V[] positions;
-            V[] positionVelocities;
-            double multiplier;           // Single scalar
-            double multiplierVelocity;   // Single scalar velocity
-        }
-
-        struct GradientResult {
-            V[] positionGradients;
-            double multiplierGradient;   // Single scalar gradient
+        struct StateWithVelocity {
+            OptimizationState!V state;
+            OptimizationState!V velocity;
+            
+            this(size_t numPositions) {
+                state = OptimizationState!V.zero(numPositions);
+                velocity = OptimizationState!V.zero(numPositions);
+            }
         }
 
         // Calculate numerical gradients in parallel
-        GradientResult calculateGradient(
-            OptimizationState current,
+        OptimizationState!V calculateGradient(
+            const StateWithVelocity current,
             ObjectiveFunction!(T, V) objective
         ) {
-            const size_t numPoints = current.positions.length;
-            auto result = GradientResult(
-                new V[numPoints],
-                0.0  // Initialize scalar multiplier gradient
-            );
+            const size_t numPoints = current.state.positions.length;
+            auto result = OptimizationState!V.zero(numPoints);
 
-            // Create queue for each worker
-            auto queues = new JumboMessageQueue[_numWorkers];
-            string[] queueNames;
+            // Create single queue for all gradient components
+            string queueName = format("/gradient_%d_%s", 
+                thisProcessID(), 
+                randomUUID().toString()[0..8]);
+            auto gradientQueue = new JumboMessageQueue(queueName);
+            scope(exit) JumboMessageQueue.cleanup(queueName);
+
+            // Create worker processes
             auto pids = new pid_t[_numWorkers];
-
-            foreach (i; 0.._numWorkers) {
-                queueNames ~= format("/gradient_%d_%s", 
-                    thisProcessID(), 
-                    randomUUID().toString()[0..8]);
-                queues[i] = new JumboMessageQueue(queueNames[i]);
-            }
 
             // Spawn worker processes
             foreach (i; 0.._numWorkers) {
                 pids[i] = fork();
                 if (pids[i] == 0) {
-                    auto queue = new JumboMessageQueue(queueNames[i]);
+                    auto queue = new JumboMessageQueue(queueName);
                     
-                    size_t[] indices;
-                    V[] gradients;
-                    for (size_t j = i; j < numPoints; j += _numWorkers) {
-                        V posGradient = V.zero();
-                        
-                        // Calculate position gradients
-                        foreach (dim; 0..V.dimension) {
-                            // Forward difference for position
-                            auto pos = current.positions.dup;
-                            pos[j][dim] += _finiteDifferenceStep;
-                            double forward = objective.evaluate(pos, current.multiplier);
+                    // Process each component assigned to this worker
+                    for (size_t idx = i; idx < current.state.numComponents; idx += _numWorkers) {
+                        // Calculate partial derivative for this component
+                        auto forward_state = current.state.dup();
+                        forward_state[idx] += _finiteDifferenceStep;
+                        double forward = objective.evaluate(forward_state);
 
-                            // Backward difference for position
-                            pos[j][dim] -= 2 * _finiteDifferenceStep;
-                            double backward = objective.evaluate(pos, current.multiplier);
+                        auto backward_state = current.state.dup();
+                        backward_state[idx] -= _finiteDifferenceStep;
+                        double backward = objective.evaluate(backward_state);
 
-                            // Central difference
-                            posGradient[dim] = 
-                                (forward - backward) / (2.0 * _finiteDifferenceStep);
+                        double derivative = (forward - backward) / (2.0 * _finiteDifferenceStep);
 
-                        }
-                        indices ~= j;
-                        gradients ~= posGradient;
+                        // Send result for this component
+                        auto msg = GradientMessage(i, idx, derivative);
+                        msg.send(queue);
                     }
-
-                    // Send batch message
-                    auto msg = GradientMessage!V(i, indices, gradients);
-                    msg.send(queue);
                     exit(0);
                 }
             }
 
-            // Collect results from workers
-            foreach (i; 0.._numWorkers) {
-                auto msg = GradientMessage!V.receive(queues[i]);
-                foreach(j, idx; msg.indices) {
-                    result.positionGradients[idx] = msg.positionGradients[j];
-                }
+            // Collect all component gradients from workers
+            size_t totalComponents = current.state.numComponents;
+            for (size_t received = 0; received < totalComponents; received++) {
+                auto msg = GradientMessage.receive(gradientQueue);
+                result[msg.index] = msg.value;
             }
 
-            // Cleanup
-            scope(exit) {
-                foreach (i; 0.._numWorkers) {
-                    if (pids[i] != 0) wait(null);
-                    JumboMessageQueue.cleanup(queueNames[i]);
+            // Cleanup worker processes
+            foreach (pid; pids) {
+                if (pid != 0) {
+                    wait(null);  // Wait for each process to exit
                 }
-            }
-
-            // Calculate multiplier gradient (done in parent process)
-            {
-                double forward = objective.evaluate(
-                    current.positions,
-                    current.multiplier + _finiteDifferenceStep
-                );
-                double backward = objective.evaluate(
-                    current.positions,
-                    current.multiplier - _finiteDifferenceStep
-                );
-                result.multiplierGradient = (forward - backward) / (2.0 * _finiteDifferenceStep);
             }
             
             return result;
         }
 
-        // Update state using momentum
-        void updateState(
-            ref OptimizationState state,
-            GradientResult gradient
+        // Calculate BB step size
+        private double calculateBBStepSize(
+            const OptimizationState!V gradient,
+            const OptimizationState!V state,
+            const OptimizationState!V previousGradient,
+            const OptimizationState!V previousState,
         ) {
-            // Compute total gradient magnitude including position gradients and scalar multiplier gradient
-            double totalMagnitudeSquared = 0.0;
-            foreach (i; 0..state.positions.length) {
-                totalMagnitudeSquared += gradient.positionGradients[i].magnitudeSquared();
-            }
-            totalMagnitudeSquared += gradient.multiplierGradient * gradient.multiplierGradient;
-            double totalMagnitude = sqrt(totalMagnitudeSquared);
+            auto s = state - previousState;          // Change in position
+            auto y = gradient - previousGradient;    // Change in gradient
             
-            // Skip update if gradient is too small
-            if (totalMagnitude < 1e-10) return;
+            double s_dot_y = 0.0;
+            double y_dot_y = 0.0;
+            double s_dot_s = 0.0;
             
-            // Update positions
-            for (size_t i = 0; i < state.positions.length; ++i) {
-                if (_updateMode == GradientUpdateMode.LearningRate && totalMagnitude < _stepSize) {
-                    state.positionVelocities[i] = 
-                        _momentum * state.positionVelocities[i] +
-                        (1 - _momentum) * gradient.positionGradients[i];
-                    state.positions[i] = state.positions[i] - 
-                        _learningRate * state.positionVelocities[i];
-                }
-                else if (_updateMode == GradientUpdateMode.StepSize || totalMagnitude >= _stepSize) {
-                    state.positionVelocities[i] = 
-                        _momentum * state.positionVelocities[i] +
-                        (1 - _momentum) * (gradient.positionGradients[i] / totalMagnitude);
-                    state.positions[i] = state.positions[i] - _stepSize * state.positionVelocities[i];
-                }
-                else {
-                    assert(false, "Invalid update mode or gradient magnitude");
-                }
+            // Calculate dot products
+            foreach (i; 0..state.numComponents) {
+                s_dot_y += s[i] * y[i];
+                y_dot_y += y[i] * y[i];
+                s_dot_s += s[i] * s[i];
             }
             
-            // Update multiplier
-            final switch (_updateMode) {
-                case GradientUpdateMode.LearningRate:
-                    state.multiplierVelocity = 
-                        state.multiplierVelocity * _momentum + 
-                        (1 - _momentum) * gradient.multiplierGradient;
-                    state.multiplier = state.multiplier - 
-                        _learningRate * state.multiplierVelocity;
-                    break;
+            if (s_dot_y == 0) {
+                // Avoid division by zero
+                return 0;
+            }
 
-                case GradientUpdateMode.StepSize:
-                    state.multiplier = state.multiplier - 
-                        (gradient.multiplierGradient / totalMagnitude) * _stepSize;
-                    break;
+            double bb1 = s_dot_y / y_dot_y;  // BB1 step size
+            double bb2 = s_dot_s / s_dot_y;  // BB2 step size
+            
+            // Auto mode selection based on which step gives better descent direction
+            if (_updateMode == GradientUpdateMode.BBAuto) {
+                // Choose BB2 if oscillating (indicated by negative s_dot_y)
+                return (s_dot_y < 0) ? bb2 : bb1;
+            }
+            else if (_updateMode == GradientUpdateMode.BB1) {
+                // Use BB1 step size
+                return bb1;
+            }
+            else if (_updateMode == GradientUpdateMode.BB2) {
+                // Use BB2 step size
+                return bb2;
+            }
+            else {
+                assert(0, "Invalid update mode");
             }
         }
         
@@ -851,34 +930,34 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
              double learningRate = 0.01, double stepSize = 0.01,
              GradientUpdateMode mode = GradientUpdateMode.LearningRate,
              double momentum = 0.9, double finiteDifferenceStep = 1e-6,
-             size_t numWorkers = totalCPUs) {
+             double initialStep = 0.01, double minStep = 1e-10, 
+             double maxStep = 1.0, size_t numWorkers = totalCPUs) {
             super(tolerance, maxIterations);
             _learningRate = learningRate;
             _stepSize = stepSize;
             _updateMode = mode;
             _momentum = momentum;
             _finiteDifferenceStep = finiteDifferenceStep;
+            _initialStep = initialStep;
+            _minStep = minStep;
+            _maxStep = maxStep;
             _numWorkers = numWorkers;
         }
         
         override OptimizationResult!(T, V) minimize(
-            V[] initialPositions,
-            double initialMultiplier,
+            OptimizationState!V initialState,
             ObjectiveFunction!(T, V) objective
         ) {
-            // Initialize optimization state
-            auto state = OptimizationState(
-                initialPositions.dup,
-                new V[initialPositions.length],  // Zero velocities for positions
-                initialMultiplier,
-                0.0  // Zero velocity for multiplier
-            );
-            
-            // Set initial position velocities to zero
-            foreach (ref v; state.positionVelocities) v = V.zero();
+            // Initialize state with velocity
+            auto state = StateWithVelocity(initialState.positions.length);
+            state.state = initialState.dup;
+
+            StateWithVelocity previousState;
+            OptimizationState!V previousGradient;
+            bool havePreviousState = false;
             
             // Initial evaluation
-            double currentValue = objective.evaluate(state.positions, state.multiplier);
+            double currentValue = objective.evaluate(state.state);
             double previousValue;
             
             // Main optimization loop
@@ -886,13 +965,48 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
                 previousValue = currentValue;
                 
                 // Calculate gradients
-                auto gradients = calculateGradient(state, objective);
+                auto gradient = calculateGradient(state, objective);
                 
-                // Update state using momentum
-                updateState(state, gradients);
+                // Compute total gradient magnitude
+                double totalMagnitude = sqrt(gradient.magnitudeSquared());
+                
+                double step;
+                OptimizationState!V updateDirection;
+
+                if (_updateMode == GradientUpdateMode.LearningRate) {
+                    step = _learningRate;
+                    updateDirection = gradient;
+                }
+                else if (_updateMode == GradientUpdateMode.StepSize) {
+                    step = _stepSize;
+                    updateDirection = gradient / totalMagnitude;  // Normalize
+                }
+                else {  // BB modes
+                    if (!havePreviousState) {
+                        // Use initial step size if no previous state
+                        step = _initialStep;
+                        havePreviousState = true;
+                    } else {
+                        // Calculate step size using BB method
+                        step = calculateBBStepSize(gradient, state.state, previousGradient, previousState.state);
+                    }
+                    updateDirection = gradient;
+                }
+                
+                debug {
+                    writefln("Gradient Magnitude: %s, Step size: %s", totalMagnitude, step);
+                }
+
+                previousState = state;
+                previousGradient = gradient;
+
+                // Update velocity using momentum
+                state.velocity = state.velocity * _momentum + updateDirection * (1 - _momentum);
+                state.state = state.state - state.velocity * min(max(step, _minStep), _maxStep);
+                
                 
                 // Evaluate current state
-                currentValue = objective.evaluate(state.positions, state.multiplier);
+                currentValue = objective.evaluate(state.state);
 
                 // Check convergence
                 if ((abs(currentValue - previousValue) / previousValue) < _tolerance) {
@@ -904,6 +1018,9 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
                 writefln("Best energy: %s", currentValue);
             }
             
-            return OptimizationResult!(T, V)(state.positions, state.multiplier);
+            return OptimizationResult!(T, V)(
+                state.state.positions,
+                state.state.multiplier
+            );
         }
 }

@@ -1,14 +1,23 @@
 {
   "horizon": 0.003,
   "optimization": {
-    "solver_type": "parallel_tempering",
-    "tolerance": 1e-6,
-    "max_iterations": 1000,
+    "solver_type": "gradient_descent",
+    "tolerance": 1e-23,
+    "max_iterations": 100,
     "gradient_descent": {
-      "gradient_mode": "learning_rate",
-      "momentum": 0.9,
-      "learning_rate": 1e-3,
-      "finite_difference_step": 1e-12,
+      "gradient_mode": "bb2",
+      "momentum": 0.0,
+      "learning_rate": 1e-6,
+      "finite_difference_step": 1e-9,
+      "min_step": {
+        "value": 0.0
+      },
+      "max_step": {
+        "value": 1e-10
+      },
+      "initial_step": {
+        "value": 1e-15
+      },
       "gradient_step_size": {
         "horizon_fraction": 1e-9
       }
@@ -27,7 +36,7 @@
   "time_stepping": {
     "initial_step": 1e-6,
     "max_step": 1e-6,
-    "total_time": 1e-5,
+    "total_time": 1e-3,
     "safety_factor": 0.1,
     "max_relative_motion": 0.1,
     "response_lag": 1000
