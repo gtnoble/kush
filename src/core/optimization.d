@@ -277,15 +277,16 @@ OptimizationSolver!(T, V) createOptimizer(T, V)(
     const OptimizationConfig config, double horizon
 ) if (isMaterialPoint!(T, V)) {
     if (config.solver_type == "gradient_descent") {
-        auto mode = config.gradient_mode == "learning_rate" ?
+        auto mode = config.gradient_descent.gradient_mode == "learning_rate" ?
             GradientUpdateMode.LearningRate : GradientUpdateMode.StepSize;
         return new GradientDescentSolver!(T, V)(
             config.tolerance,
             config.max_iterations,
-            config.learning_rate,
+            config.gradient_descent.learning_rate,
             config.getEffectiveStepSize(horizon),
             mode,
-            config.momentum
+            config.gradient_descent.momentum,
+            config.gradient_descent.finite_difference_step
         );
     } else if (config.solver_type == "parallel_tempering") {
         return new ParallelTemperingSolver!(T, V)(
@@ -294,7 +295,8 @@ OptimizationSolver!(T, V) createOptimizer(T, V)(
             config.getNumReplicas(),
             config.getNumProcesses(),
             config.parallel_tempering.min_temperature,
-            config.parallel_tempering.max_temperature
+            config.parallel_tempering.max_temperature,
+            config.getEffectiveProposalStepSize(horizon)
         );
     }
     
@@ -349,8 +351,12 @@ abstract class OptimizationSolver(T, V) if (isMaterialPoint!(T, V)) {
  *   "parallel_tempering": {
  *     "num_replicas": 8,  // Optional: defaults to CPU count
  *     "num_processes": 4,  // Optional: defaults to CPU count
- *     "min_temperature": 0.1,
- *     "max_temperature": 2.0
+ *     "min_temperature": 0.1,         // Controls local optimization
+ *     "max_temperature": 2.0,         // Controls global exploration
+ *     "proposal_step_size": {
+ *       "value": 1e-4,                // Fixed step size for proposals
+ *       "horizon_fraction": 0.0001    // Optional: step = horizon * fraction
+ *     }
  *   }
  * }
  */
@@ -372,7 +378,7 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
         size_t _numProcesses;
         double _minTemperature;
         double _maxTemperature;
-        double _gradientStepSize = 1e-6;
+        double _proposalStepSize = 1e-6;
         
         // Resource management
         ProcessManager _processManager;
@@ -418,12 +424,14 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
     public:
         this(double tolerance = 1e-6, size_t maxIterations = 1000,
              size_t numReplicas = 4, size_t numProcesses = 0,
-             double minTemperature = 0.1, double maxTemperature = 2.0) {
+             double minTemperature = 0.1, double maxTemperature = 2.0,
+             double proposalStepSize = 1e-6) {
             super(tolerance, maxIterations);
             _numReplicas = numReplicas;
             _numProcesses = numProcesses > 0 ? numProcesses : totalCPUs;
             _minTemperature = minTemperature;
             _maxTemperature = maxTemperature;
+            _proposalStepSize = proposalStepSize;
         }
         
         // Handle worker process logic - now includes proposal generation and acceptance
@@ -447,14 +455,14 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
                     assert(proposedPositions.length > 0);
 
                     foreach (i, pos; proposedPositions) {
-                        foreach (dim; 0..V.dimension) {
-                            proposedPositions[i][dim] += normal(0, _gradientStepSize);
+            foreach (dim; 0..V.dimension) {
+                proposedPositions[i][dim] += normal(0, _proposalStepSize);
                         }
                     }
                     
                     // Generate proposed multiplier
                     double proposedMultiplier = input.state.multiplier + 
-                        normal(0, _gradientStepSize);
+                        normal(0, _proposalStepSize);
                         
                     assert(proposedPositions.length == input.state.positions.length);
 
@@ -659,12 +667,15 @@ private struct GradientMessage(V) {
  *   "solver_type": "gradient_descent",
  *   "tolerance": 1e-6,
  *   "max_iterations": 1000,
- *   "momentum": 0.9,
- *   "gradient_mode": "step_size",  // or "learning_rate"
- *   "learning_rate": 0.01,  // Used if mode is "learning_rate"
- *   "gradient_step_size": {
- *     "value": 1e-4,
- *     "horizon_fraction": 0.0001  // Optional: step = horizon * fraction
+ *   "gradient_descent": {
+ *     "momentum": 0.9,
+ *     "gradient_mode": "step_size",  // or "learning_rate"
+ *     "learning_rate": 0.01,  // Used if mode is "learning_rate"
+ *     "finite_difference_step": 1e-6,  // Step size for numerical derivatives
+ *     "gradient_step_size": {
+ *       "value": 1e-4,
+ *       "horizon_fraction": 0.0001  // Optional: step = horizon * fraction
+ *     }
  *   }
  * }
  */
@@ -674,7 +685,7 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
         double _stepSize = 0.01;
         double _momentum = 0.9;
         GradientUpdateMode _updateMode = GradientUpdateMode.LearningRate;
-        double _gradientStepSize = 1e-6;
+        double _finiteDifferenceStep = 1e-6;
         size_t _numWorkers;  // Number of worker processes for gradient calculation
 
         struct OptimizationState {
@@ -727,16 +738,16 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
                         foreach (dim; 0..V.dimension) {
                             // Forward difference for position
                             auto pos = current.positions.dup;
-                            pos[j][dim] += _gradientStepSize;
+                            pos[j][dim] += _finiteDifferenceStep;
                             double forward = objective.evaluate(pos, current.multiplier);
 
                             // Backward difference for position
-                            pos[j][dim] -= 2 * _gradientStepSize;
+                            pos[j][dim] -= 2 * _finiteDifferenceStep;
                             double backward = objective.evaluate(pos, current.multiplier);
 
                             // Central difference
                             posGradient[dim] = 
-                                (forward - backward) / (2.0 * _gradientStepSize);
+                                (forward - backward) / (2.0 * _finiteDifferenceStep);
 
                         }
                         indices ~= j;
@@ -770,13 +781,13 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
             {
                 double forward = objective.evaluate(
                     current.positions,
-                    current.multiplier + _gradientStepSize
+                    current.multiplier + _finiteDifferenceStep
                 );
                 double backward = objective.evaluate(
                     current.positions,
-                    current.multiplier - _gradientStepSize
+                    current.multiplier - _finiteDifferenceStep
                 );
-                result.multiplierGradient = (forward - backward) / (2.0 * _gradientStepSize);
+                result.multiplierGradient = (forward - backward) / (2.0 * _finiteDifferenceStep);
             }
             
             return result;
@@ -800,49 +811,53 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
             
             // Update positions
             for (size_t i = 0; i < state.positions.length; ++i) {
-                final switch (_updateMode) {
-                    case GradientUpdateMode.LearningRate:
-                        state.positionVelocities[i] = 
-                            state.positionVelocities[i] * _momentum - 
-                            (gradient.positionGradients[i] / totalMagnitude) * _learningRate;
-                        break;
-
-                    case GradientUpdateMode.StepSize:
-                        state.positionVelocities[i] = 
-                            state.positionVelocities[i] * _momentum - 
-                            (gradient.positionGradients[i] / totalMagnitude) * _stepSize;
-                        break;
+                if (_updateMode == GradientUpdateMode.LearningRate && totalMagnitude < _stepSize) {
+                    state.positionVelocities[i] = 
+                        _momentum * state.positionVelocities[i] +
+                        (1 - _momentum) * gradient.positionGradients[i];
+                    state.positions[i] = state.positions[i] - 
+                        _learningRate * state.positionVelocities[i];
                 }
-                state.positions[i] = state.positions[i] + state.positionVelocities[i];
+                else if (_updateMode == GradientUpdateMode.StepSize || totalMagnitude >= _stepSize) {
+                    state.positionVelocities[i] = 
+                        _momentum * state.positionVelocities[i] +
+                        (1 - _momentum) * (gradient.positionGradients[i] / totalMagnitude);
+                    state.positions[i] = state.positions[i] - _stepSize * state.positionVelocities[i];
+                }
+                else {
+                    assert(false, "Invalid update mode or gradient magnitude");
+                }
             }
             
             // Update multiplier
             final switch (_updateMode) {
                 case GradientUpdateMode.LearningRate:
                     state.multiplierVelocity = 
-                        state.multiplierVelocity * _momentum - 
-                        (gradient.multiplierGradient / totalMagnitude) * _learningRate;
+                        state.multiplierVelocity * _momentum + 
+                        (1 - _momentum) * gradient.multiplierGradient;
+                    state.multiplier = state.multiplier - 
+                        _learningRate * state.multiplierVelocity;
                     break;
 
                 case GradientUpdateMode.StepSize:
-                    state.multiplierVelocity = 
-                        state.multiplierVelocity * _momentum - 
+                    state.multiplier = state.multiplier - 
                         (gradient.multiplierGradient / totalMagnitude) * _stepSize;
                     break;
             }
-            state.multiplier = state.multiplier + state.multiplierVelocity;
         }
         
     public:
         this(double tolerance = 1e-6, size_t maxIterations = 1000,
              double learningRate = 0.01, double stepSize = 0.01,
              GradientUpdateMode mode = GradientUpdateMode.LearningRate,
-             double momentum = 0.9, size_t numWorkers = totalCPUs) {
+             double momentum = 0.9, double finiteDifferenceStep = 1e-6,
+             size_t numWorkers = totalCPUs) {
             super(tolerance, maxIterations);
             _learningRate = learningRate;
             _stepSize = stepSize;
             _updateMode = mode;
             _momentum = momentum;
+            _finiteDifferenceStep = finiteDifferenceStep;
             _numWorkers = numWorkers;
         }
         
@@ -880,7 +895,7 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
                 currentValue = objective.evaluate(state.positions, state.multiplier);
 
                 // Check convergence
-                if (abs(currentValue - previousValue) < _tolerance) {
+                if ((abs(currentValue - previousValue) / previousValue) < _tolerance) {
                     break;
                 }
             }

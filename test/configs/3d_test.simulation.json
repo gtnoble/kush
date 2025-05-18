@@ -1,11 +1,15 @@
 {
   "horizon": 0.002,
   "optimization": {
+    "solver_type": "gradient_descent",
     "tolerance": 1e-6,
     "max_iterations": 10,
-    "momentum": 0.1,
-    "gradient_step_size": {
-      "horizon_fraction": 0.0001
+    "gradient_descent": {
+      "momentum": 0.1,
+      "finite_difference_step": 1e-6,
+      "gradient_step_size": {
+        "horizon_fraction": 0.0001
+      }
     }
   },
   "time_stepping": {

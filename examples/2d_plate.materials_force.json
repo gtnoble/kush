@@ -1,0 +1,15 @@
+{
+  "materials": {
+    "aluminum_base": {
+      "density": 2700.0,
+      "youngsModulus": 70e9,
+      "criticalStretch": 0.1
+    },
+    "fixed_boundary": {
+      "fixed_velocity": true
+    },
+    "loaded_edge": {
+      "velocity": [1, 0.0]
+    }
+  }
+}

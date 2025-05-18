@@ -3,21 +3,31 @@
   "optimization": {
     "solver_type": "parallel_tempering",
     "tolerance": 1e-6,
-    "max_iterations": 1,
-    "gradient_step_size": {
-      "horizon_fraction": 1e-4
+    "max_iterations": 1000,
+    "gradient_descent": {
+      "gradient_mode": "learning_rate",
+      "momentum": 0.9,
+      "learning_rate": 1e-3,
+      "finite_difference_step": 1e-12,
+      "gradient_step_size": {
+        "horizon_fraction": 1e-9
+      }
     },
     "parallel_tempering": {
       "min_temperature": 1e-6,
-      "max_temperature": 20,
-      "num_replicas": 128,
-      "num_processes": 1
+      "max_temperature": 1e9,
+      "num_replicas": 320,
+      "num_processes": 8,
+      "proposal_step_size": {
+        "value": 1e-12,
+        "horizon_fraction": 1e-9
+      }
     }
   },
   "time_stepping": {
-    "initial_step": 1e-14,
-    "max_step": 5e-4,
-    "total_time": 10e-3,
+    "initial_step": 1e-6,
+    "max_step": 1e-6,
+    "total_time": 1e-5,
     "safety_factor": 0.1,
     "max_relative_motion": 0.1,
     "response_lag": 1000
@@ -27,6 +37,6 @@
   },
   "output": {
     "csv_file": "2d_plate_result.csv",
-    "time_interval": 10e-6
+    "time_interval": 1e-6
   }
 }

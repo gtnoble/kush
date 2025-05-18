@@ -1,1 +1,2 @@
-Instead of one message queue per replica, lets have one message queue per child process
+Run simulation and debug
+Standard deviation not being propagated to the parallel tempering solver

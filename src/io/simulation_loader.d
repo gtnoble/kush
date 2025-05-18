@@ -8,22 +8,26 @@ import std.exception : enforce;
 import std.format : format;
 import std.file : readText;
 
-/// Parameters for optimization
-struct OptimizationConfig {
-    double tolerance = 1e-6;
-    int max_iterations = 10;
-    string solver_type = "gradient_descent";  // "gradient_descent" or "parallel_tempering"
-
-    // Gradient descent specific settings
-    double momentum = 0.1;
+/// Parameters for gradient descent optimization
+struct GradientDescent {
+    double momentum = 0.9;
     string gradient_mode = "step_size";  // "step_size" or "learning_rate"
     double learning_rate = 0.01;
+    double finite_difference_step = 1e-6;  // Step size for numerical derivatives
     
     struct GradientStepSize {
         double value = 1e-4;
         double horizon_fraction;  // Optional: if specified, step = horizon * fraction
     }
     GradientStepSize gradient_step_size;
+}
+
+/// Parameters for optimization
+struct OptimizationConfig {
+    double tolerance = 1e-6;
+    int max_iterations = 10;
+    string solver_type = "gradient_descent";  // "gradient_descent" or "parallel_tempering"
+    GradientDescent gradient_descent;
 
     size_t getNumReplicas() const {
         import std.parallelism : totalCPUs;
@@ -39,6 +43,12 @@ struct OptimizationConfig {
         size_t num_processes;  // Defaults to totalCPUs if not specified
         double min_temperature = 0.1;
         double max_temperature = 2.0;
+
+        struct ProposalStepSize {
+            double value = 1e-4;
+            double horizon_fraction;  // Optional: if specified, step = horizon * fraction
+        }
+        ProposalStepSize proposal_step_size;
     }
 
     size_t getNumProcesses() const {
@@ -49,13 +59,21 @@ struct OptimizationConfig {
         return totalCPUs;
     }
     ParallelTempering parallel_tempering;
+
+    /// Calculate the effective proposal step size for parallel tempering
+    double getEffectiveProposalStepSize(double horizon) const {
+        if (parallel_tempering.proposal_step_size.horizon_fraction > 0.0) {
+            return horizon * parallel_tempering.proposal_step_size.horizon_fraction;
+        }
+        return parallel_tempering.proposal_step_size.value;
+    }
     
     /// Calculate the effective gradient step size
     double getEffectiveStepSize(double horizon) const {
-        if (gradient_step_size.horizon_fraction > 0.0) {
-            return horizon * gradient_step_size.horizon_fraction;
+        if (gradient_descent.gradient_step_size.horizon_fraction > 0.0) {
+            return horizon * gradient_descent.gradient_step_size.horizon_fraction;
         }
-        return gradient_step_size.value;
+        return gradient_descent.gradient_step_size.value;
     }
 }
 
@@ -136,13 +154,51 @@ private OptimizationConfig parseOptimizationConfig(JSONValue json) {
         enforce(config.max_iterations > 0, "Max iterations must be positive");
     }
     
-    // Parse momentum
-    if ("momentum" in json) {
-        config.momentum = json["momentum"].get!double;
-        enforce(config.momentum >= 0.0 && config.momentum < 1.0, 
-            "Momentum must be in range [0, 1)");
+    // Parse gradient descent settings
+    if ("gradient_descent" in json || config.solver_type == "gradient_descent") {
+        auto gd = "gradient_descent" in json ? json["gradient_descent"] : json;
+        
+        if ("momentum" in gd) {
+            config.gradient_descent.momentum = gd["momentum"].get!double;
+            enforce(config.gradient_descent.momentum >= 0.0 && config.gradient_descent.momentum < 1.0,
+                "Momentum must be in range [0, 1)");
+        }
+
+        if ("gradient_mode" in gd) {
+            config.gradient_descent.gradient_mode = gd["gradient_mode"].get!string;
+            enforce(config.gradient_descent.gradient_mode == "step_size" || 
+                   config.gradient_descent.gradient_mode == "learning_rate",
+                "Gradient mode must be either 'step_size' or 'learning_rate'");
+        }
+
+        if ("learning_rate" in gd) {
+            config.gradient_descent.learning_rate = gd["learning_rate"].get!double;
+            enforce(config.gradient_descent.learning_rate > 0.0, 
+                "Learning rate must be positive");
+        }
+
+        if ("finite_difference_step" in gd) {
+            config.gradient_descent.finite_difference_step = gd["finite_difference_step"].get!double;
+            enforce(config.gradient_descent.finite_difference_step > 0.0,
+                "Finite difference step must be positive");
+        }
+
+        if ("gradient_step_size" in gd) {
+            auto step = gd["gradient_step_size"];
+            if ("value" in step) {
+                config.gradient_descent.gradient_step_size.value = step["value"].get!double;
+                enforce(config.gradient_descent.gradient_step_size.value > 0.0,
+                    "Gradient step size value must be positive");
+            }
+            if ("horizon_fraction" in step) {
+                config.gradient_descent.gradient_step_size.horizon_fraction =
+                    step["horizon_fraction"].get!double;
+                enforce(config.gradient_descent.gradient_step_size.horizon_fraction > 0.0,
+                    "Horizon fraction must be positive");
+            }
+        }
     }
-    
+
     if ("parallel_tempering" in json) {
         auto pt = json["parallel_tempering"];
         
@@ -170,35 +226,23 @@ private OptimizationConfig parseOptimizationConfig(JSONValue json) {
                    config.parallel_tempering.min_temperature,
                 "Maximum temperature must be greater than minimum temperature");
         }
-    }
 
-    // Parse learning rate
-    if ("learning_rate" in json) {
-        config.learning_rate = json["learning_rate"].get!double;
-        enforce(config.learning_rate > 0.0, "Learning rate must be positive");
-    }
-
-    // Parse gradient mode
-    if ("gradient_mode" in json) {
-        config.gradient_mode = json["gradient_mode"].get!string;
-        enforce(config.gradient_mode == "step_size" || config.gradient_mode == "learning_rate",
-            "Gradient mode must be either 'step_size' or 'learning_rate'");
-    }
-    
-    if ("gradient_step_size" in json) {
-        auto step = json["gradient_step_size"];
-        if ("value" in step) {
-            config.gradient_step_size.value = step["value"].get!double;
-            enforce(config.gradient_step_size.value > 0.0, 
-                "Gradient step size value must be positive");
-        }
-        if ("horizon_fraction" in step) {
-            config.gradient_step_size.horizon_fraction = 
-                step["horizon_fraction"].get!double;
-            enforce(config.gradient_step_size.horizon_fraction > 0.0, 
-                "Horizon fraction must be positive");
+        if ("proposal_step_size" in pt) {
+            auto step = pt["proposal_step_size"];
+            if ("value" in step) {
+                config.parallel_tempering.proposal_step_size.value = step["value"].get!double;
+                enforce(config.parallel_tempering.proposal_step_size.value > 0.0,
+                    "Proposal step size value must be positive");
+            }
+            if ("horizon_fraction" in step) {
+                config.parallel_tempering.proposal_step_size.horizon_fraction = 
+                    step["horizon_fraction"].get!double;
+                enforce(config.parallel_tempering.proposal_step_size.horizon_fraction > 0.0,
+                    "Horizon fraction must be positive");
+            }
         }
     }
+
     
     return config;
 }
