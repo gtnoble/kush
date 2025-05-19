@@ -3,6 +3,7 @@ module core.optimization;
 import core.material_point;
 import math.vector;
 import std.math : abs, sqrt, exp;
+import std.math.traits : isNaN;
 import std.algorithm : min, max;
 import core.thread : Thread;
 import core.time : dur;
@@ -899,13 +900,19 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
                 s_dot_s += s[i] * s[i];
             }
             
-            if (s_dot_y == 0) {
-                // Avoid division by zero
-                return 0;
-            }
-
             double bb1 = s_dot_y / y_dot_y;  // BB1 step size
             double bb2 = s_dot_s / s_dot_y;  // BB2 step size
+            
+            //enforce(!isNaN(bb1) && !isNaN(bb2), "Invalid BB step sizes");
+            if (isNaN(bb1) && isNaN(bb2)) {
+                return 0;
+            }
+            else if (isNaN(bb1)) {
+                return bb2;
+            }
+            else if (isNaN(bb2)) {
+                return bb1;
+            }
             
             // Auto mode selection based on which step gives better descent direction
             if (_updateMode == GradientUpdateMode.BBAuto) {
@@ -913,11 +920,9 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
                 return (s_dot_y < 0) ? bb2 : bb1;
             }
             else if (_updateMode == GradientUpdateMode.BB1) {
-                // Use BB1 step size
                 return bb1;
             }
             else if (_updateMode == GradientUpdateMode.BB2) {
-                // Use BB2 step size
                 return bb2;
             }
             else {
@@ -954,7 +959,6 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
 
             StateWithVelocity previousState;
             OptimizationState!V previousGradient;
-            bool havePreviousState = false;
             
             // Initial evaluation
             double currentValue = objective.evaluate(state.state);
@@ -982,10 +986,9 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
                     updateDirection = gradient / totalMagnitude;  // Normalize
                 }
                 else {  // BB modes
-                    if (!havePreviousState) {
+                    if (iter == 0) {
                         // Use initial step size if no previous state
                         step = _initialStep;
-                        havePreviousState = true;
                     } else {
                         // Calculate step size using BB method
                         step = calculateBBStepSize(gradient, state.state, previousGradient, previousState.state);
@@ -993,9 +996,6 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
                     updateDirection = gradient;
                 }
                 
-                debug {
-                    writefln("Gradient Magnitude: %s, Step size: %s", totalMagnitude, step);
-                }
 
                 previousState = state;
                 previousGradient = gradient;
@@ -1003,13 +1003,23 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
                 // Update velocity using momentum
                 state.velocity = state.velocity * _momentum + updateDirection * (1 - _momentum);
                 state.state = state.state - state.velocity * min(max(step, _minStep), _maxStep);
-                
-                
+
                 // Evaluate current state
                 currentValue = objective.evaluate(state.state);
 
+                debug {
+                    writefln(
+                        "Gradient Magnitude: %s, Step size: %s, Multiplier Value: %s, Multiplier Partial: %s, Lagrangian: %s", 
+                        totalMagnitude, 
+                        step,
+                        state.state.multiplier,
+                        gradient.multiplier,
+                        currentValue
+                    );
+                }
+
                 // Check convergence
-                if ((abs(currentValue - previousValue) / previousValue) < _tolerance) {
+                if (iter > 0 && (abs(currentValue - previousValue) / previousValue) <= _tolerance) {
                     break;
                 }
             }

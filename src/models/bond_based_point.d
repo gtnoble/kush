@@ -18,7 +18,6 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
     private V _referencePosition;
     private V _velocity;
     private double _mass;
-    private bool _isVelocityFixed;  // Whether velocity updates are disabled
     private V _constantForce;  // Store constant external force
     private double _timeElapsed;      // Track simulation time
     private VelocityConstraint!V* _velocityConstraint;  // Velocity constraint (pointer to allow null checks)
@@ -64,7 +63,11 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
         _bondStiffness = bondStiffness;
         _criticalStretch = criticalStretch;
         _damper = damper;
-        _isVelocityFixed = fixedVelocity;
+        if (fixedVelocity) {
+            _velocityConstraint = new VelocityConstraint!V(initialVelocity);
+        } else {
+            _velocityConstraint = null;  // No constraint
+        }
         _rampDuration = rampDuration;
         _timeElapsed = 0.0;
         _constantForce = constantForce;  // Start with zero force

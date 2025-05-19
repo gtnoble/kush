@@ -182,7 +182,7 @@ private OptimizationConfig parseOptimizationConfig(JSONValue json) {
     // Parse tolerance
     if ("tolerance" in json) {
         config.tolerance = json["tolerance"].get!double;
-        enforce(config.tolerance > 0.0, "Tolerance must be positive");
+        enforce(config.tolerance >= 0.0, "Tolerance must be non-negative");
     }
     
     // Parse max iterations
