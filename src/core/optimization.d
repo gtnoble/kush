@@ -421,10 +421,12 @@ OptimizationSolver!(T, V) createOptimizer(T, V)(
             config.gradient_descent.getEffectiveGradientStep(horizon),
             mode,
             config.gradient_descent.momentum,
-            config.gradient_descent.finite_difference_step,
+            config.gradient_descent.finite_difference.step_size,
             config.gradient_descent.getEffectiveInitialStep(horizon),
             config.gradient_descent.getEffectiveMinStep(horizon),
-            config.gradient_descent.getEffectiveMaxStep(horizon)
+            config.gradient_descent.getEffectiveMaxStep(horizon),
+            totalCPUs,
+            config.gradient_descent.finite_difference.order
         );
     } else if (config.solver_type == "parallel_tempering") {
         return new ParallelTemperingSolver!(T, V)(
@@ -805,8 +807,21 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
         double _momentum = 0.9;
         GradientUpdateMode _updateMode = GradientUpdateMode.LearningRate;
         double _finiteDifferenceStep = 1e-6;
+        int _finiteDifferenceOrder = 2;  // Default to 2nd order
         size_t _numWorkers;  // Number of worker processes for gradient calculation
-
+        
+        // Coefficients for finite difference calculations of different orders
+        static immutable double[][int] DIFFERENCE_COEFFS = [
+            // 2nd order
+            2: [-0.5, 0.0, 0.5],
+            // 4th order
+            4: [1.0/12.0, -2.0/3.0, 0.0, 2.0/3.0, -1.0/12.0],
+            // 6th order
+            6: [-1.0/60.0, 3.0/20.0, -3.0/4.0, 0.0, 3.0/4.0, -3.0/20.0, 1.0/60.0],
+            // 8th order
+            8: [1.0/280.0, -4.0/105.0, 1.0/5.0, -4.0/5.0, 0.0, 4.0/5.0, -1.0/5.0, 4.0/105.0, -1.0/280.0]
+        ];
+        
         struct StateWithVelocity {
             OptimizationState!V state;
             OptimizationState!V velocity;
@@ -843,16 +858,23 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
                     
                     // Process each component assigned to this worker
                     for (size_t idx = i; idx < current.state.numComponents; idx += _numWorkers) {
-                        // Calculate partial derivative for this component
-                        auto forward_state = current.state.dup();
-                        forward_state[idx] += _finiteDifferenceStep;
-                        double forward = objective.evaluate(forward_state);
-
-                        auto backward_state = current.state.dup();
-                        backward_state[idx] -= _finiteDifferenceStep;
-                        double backward = objective.evaluate(backward_state);
-
-                        double derivative = (forward - backward) / (2.0 * _finiteDifferenceStep);
+                        // Get finite difference coefficients for current order
+                        auto coeffs = DIFFERENCE_COEFFS[_finiteDifferenceOrder];
+                        int stencilLength = cast(int)coeffs.length;
+                        int halfPoints = (stencilLength - 1) / 2;
+                        
+                        // Calculate derivative using higher-order stencil
+                        double derivative = 0.0;
+                        for (int j = 0; j < stencilLength; j++) {
+                            if (coeffs[j] == 0.0) continue;  // Skip center point if coefficient is 0
+                            
+                            auto eval_state = current.state.dup();
+                            eval_state[idx] += _finiteDifferenceStep * (j - halfPoints);
+                            double eval = objective.evaluate(eval_state);
+                            derivative += coeffs[j] * eval;
+                        }
+                        
+                        derivative /= _finiteDifferenceStep;
 
                         // Send result for this component
                         auto msg = GradientMessage(i, idx, derivative);
@@ -936,7 +958,8 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
              GradientUpdateMode mode = GradientUpdateMode.LearningRate,
              double momentum = 0.9, double finiteDifferenceStep = 1e-6,
              double initialStep = 0.01, double minStep = 1e-10, 
-             double maxStep = 1.0, size_t numWorkers = totalCPUs) {
+             double maxStep = 1.0, size_t numWorkers = totalCPUs,
+             int finiteDifferenceOrder = 2) {
             super(tolerance, maxIterations);
             _learningRate = learningRate;
             _stepSize = stepSize;
@@ -947,6 +970,7 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
             _minStep = minStep;
             _maxStep = maxStep;
             _numWorkers = numWorkers;
+            _finiteDifferenceOrder = finiteDifferenceOrder;
         }
         
         override OptimizationResult!(T, V) minimize(

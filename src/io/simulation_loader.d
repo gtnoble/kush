@@ -26,7 +26,13 @@ struct GradientDescent {
     double momentum = 0.9;
     string gradient_mode = "step_size";  // "step_size", "learning_rate", "bb1", "bb2", or "bb-auto"
     double learning_rate = 0.01;         // Used in learning_rate mode
-    double finite_difference_step = 1e-6;  // Step size for numerical derivatives
+    
+    /// Configuration for finite difference calculations
+    struct FiniteDifferenceConfig {
+        int order = 2;               // Order of accuracy (2, 4, 6, or 8)
+        double step_size = 1e-6;     // Step size for finite differences
+    }
+    FiniteDifferenceConfig finite_difference;
     
     StepSize initial_step;     // Initial step size for all modes
     StepSize min_step;         // Minimum allowed step size
@@ -217,10 +223,20 @@ private OptimizationConfig parseOptimizationConfig(JSONValue json) {
                 "Learning rate must be positive");
         }
 
-        if ("finite_difference_step" in gd) {
-            config.gradient_descent.finite_difference_step = gd["finite_difference_step"].get!double;
-            enforce(config.gradient_descent.finite_difference_step > 0.0,
-                "Finite difference step must be positive");
+        if ("finite_difference" in gd) {
+            auto fd = gd["finite_difference"];
+            if ("order" in fd) {
+                config.gradient_descent.finite_difference.order = fd["order"].get!int;
+                enforce(config.gradient_descent.finite_difference.order >= 2 && 
+                       config.gradient_descent.finite_difference.order % 2 == 0 &&
+                       config.gradient_descent.finite_difference.order <= 8,
+                    "Finite difference order must be 2, 4, 6, or 8");
+            }
+            if ("step_size" in fd) {
+                config.gradient_descent.finite_difference.step_size = fd["step_size"].get!double;
+                enforce(config.gradient_descent.finite_difference.step_size > 0.0,
+                    "Finite difference step size must be positive");
+            }
         }
 
         // Parse step sizes
