@@ -330,6 +330,54 @@ struct Vector(size_t N = 0) {
         }
         return 0;
     }
+
+    // Hadamard (element-wise) multiplication
+    Vector!N hadamard(Vector!N other) const {
+        static if (N > 0) {
+            Vector!N result;
+            static if (N == 2 && is(double2)) {
+                result._components = _components * other._components;
+            } else static if (N == 3 && is(double4)) {
+                result._components = _components * other._components;
+            } else {
+                foreach (i; 0..N) {
+                    result._components[i] = _components[i] * other._components[i];
+                }
+            }
+            return result;
+        } else {
+            assert(_dimension == other._dimension, "Dimension mismatch");
+            auto result = Vector!N(_dimension);
+            foreach (i; 0.._dimension) {
+                result._components[i] = _components[i] * other._components[i];
+            }
+            return result;
+        }
+    }
+
+    // Hadamard (element-wise) division
+    Vector!N hadamardDiv(Vector!N other) const {
+        static if (N > 0) {
+            Vector!N result;
+            static if (N == 2 && is(double2)) {
+                result._components = _components / other._components;
+            } else static if (N == 3 && is(double4)) {
+                result._components = _components / other._components;
+            } else {
+                foreach (i; 0..N) {
+                    result._components[i] = _components[i] / other._components[i];
+                }
+            }
+            return result;
+        } else {
+            assert(_dimension == other._dimension, "Dimension mismatch");
+            auto result = Vector!N(_dimension);
+            foreach (i; 0.._dimension) {
+                result._components[i] = _components[i] / other._components[i];
+            }
+            return result;
+        }
+    }
 }
 
 // Type aliases for common dimensions
