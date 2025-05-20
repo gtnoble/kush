@@ -195,6 +195,10 @@ struct OptimizationState(V) {
         }
         return total;
     }
+    
+    double magnitude() const {
+        return sqrt(magnitudeSquared());
+    }
 
     static OptimizationState!V zero(size_t numPositions) {
         auto result = OptimizationState!V(new V[numPositions]);
@@ -207,12 +211,18 @@ struct OptimizationState(V) {
 
     ubyte[] toBytes() const {
         ubyte[] buffer;
-        buffer ~= cast(ubyte[])(&multiplier)[0..1];
         
-        // Serialize positions array size and data
+        // Serialize multiplier
+        buffer ~= cast(ubyte[])(&multiplier)[0..double.sizeof];
+        
+        // Serialize positions array size
         size_t size = positions.length;
-        buffer ~= cast(ubyte[])(&size)[0..1];
-        buffer ~= cast(ubyte[])positions[];
+        buffer ~= cast(ubyte[])(&size)[0..size_t.sizeof];
+        
+        // Serialize each vector using Vector's toBytes method
+        foreach (pos; positions) {
+            buffer ~= pos.toBytes();
+        }
         
         return buffer;
     }
@@ -229,12 +239,19 @@ struct OptimizationState(V) {
         state.multiplier = *cast(double*)(data.ptr + offset);
         offset += double.sizeof;
         
-        // Deserialize positions array size and data
+        // Deserialize positions array size
         size_t size = *cast(size_t*)(data.ptr + offset);
         offset += size_t.sizeof;
         
+        // Deserialize each vector using Vector's fromBytes method
         state.positions = new V[size];
-        state.positions[] = cast(V[])(data[offset..offset + V.sizeof * size])[];
+        foreach (i; 0..size) {
+            // Calculate the size of each vector's serialized data
+            auto vector_data = data[offset..$];
+            state.positions[i] = V.fromBytes(vector_data);
+            // Update offset by the size of the vector's data
+            offset += state.positions[i].toBytes().length;
+        }
         
         return state;
     }
@@ -382,17 +399,6 @@ class TemperingQueueManager(V) {
         }
 }
 
-// Result type containing positions and scalar Lagrange multiplier
-struct OptimizationResult(T, V) if (isMaterialPoint!(T, V)) {
-    V[] positions;
-    double multiplier;    // Single scalar multiplier for all velocity constraints
-    
-    this(V[] pos, double mult = 0.0) {
-        positions = pos;
-        multiplier = mult;
-    }
-}
-
 import io.simulation_loader : OptimizationConfig;
 
 /// Create an optimizer based on configuration
@@ -462,7 +468,7 @@ abstract class OptimizationSolver(T, V) if (isMaterialPoint!(T, V)) {
         }
         
         // Core optimization method to be implemented by concrete solvers
-        abstract OptimizationResult!(T, V) minimize(
+        abstract OptimizationState!V minimize(
             OptimizationState!V initialState,
             ObjectiveFunction!(T, V) objective
         );
@@ -614,7 +620,7 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
             }
         }
         
-        override OptimizationResult!(T, V) minimize(
+        override OptimizationState!V minimize(
             OptimizationState!V initialState,
             ObjectiveFunction!(T, V) objective
         ) {
@@ -686,7 +692,7 @@ class ParallelTemperingSolver(T, V) : OptimizationSolver!(T, V) {
                 writefln("Best energy: %s", best.energy);
             }
             
-            return OptimizationResult!(T, V)(best.state.positions, best.state.multiplier);
+            return best.state;
         }
 }
 
@@ -863,18 +869,19 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
                         int stencilLength = cast(int)coeffs.length;
                         int halfPoints = (stencilLength - 1) / 2;
                         
+                        double step_size = sqrt(double.epsilon) * max(abs(current.state[idx]), 1);
                         // Calculate derivative using higher-order stencil
                         double derivative = 0.0;
                         for (int j = 0; j < stencilLength; j++) {
                             if (coeffs[j] == 0.0) continue;  // Skip center point if coefficient is 0
                             
                             auto eval_state = current.state.dup();
-                            eval_state[idx] += _finiteDifferenceStep * (j - halfPoints);
+                            eval_state[idx] += step_size * (j - halfPoints);
                             double eval = objective.evaluate(eval_state);
                             derivative += coeffs[j] * eval;
                         }
                         
-                        derivative /= _finiteDifferenceStep;
+                        derivative /= step_size;
 
                         // Send result for this component
                         auto msg = GradientMessage(i, idx, derivative);
@@ -973,7 +980,7 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
             _finiteDifferenceOrder = finiteDifferenceOrder;
         }
         
-        override OptimizationResult!(T, V) minimize(
+        override OptimizationState!V minimize(
             OptimizationState!V initialState,
             ObjectiveFunction!(T, V) objective
         ) {
@@ -1052,9 +1059,6 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
                 writefln("Best energy: %s", currentValue);
             }
             
-            return OptimizationResult!(T, V)(
-                state.state.positions,
-                state.state.multiplier
-            );
+            return state.state;
         }
 }

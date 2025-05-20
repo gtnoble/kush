@@ -355,6 +355,55 @@ struct Vector(size_t N = 0) {
         }
     }
 
+    // Serialize vector to bytes
+    ubyte[] toBytes() const {
+        ubyte[] buffer;
+
+        static if (N > 0) {
+            // For compile-time dimension, components are fixed size
+            static if (N == 2 && is(double2)) {
+                buffer ~= (cast(ubyte*)&_components[0])[0..double.sizeof * 2];
+            } else static if (N == 3 && is(double4)) {
+                buffer ~= (cast(ubyte*)&_components[0])[0..double.sizeof * 3];
+            } else {
+                buffer ~= (cast(ubyte*)_components.ptr)[0..double.sizeof * N];
+            }
+        } else {
+            // For runtime dimension, include size and components
+            auto size = _dimension;
+            buffer ~= cast(ubyte[])(&size)[0..1];
+            buffer ~= (cast(ubyte*)_components.ptr)[0..double.sizeof * _dimension];
+        }
+        
+        return buffer;
+    }
+
+    // Deserialize vector from bytes
+    static Vector!N fromBytes(ubyte[] data) {
+        size_t offset = 0;
+        
+        static if (N > 0) {
+            // Fixed dimension - create vector and copy components
+            Vector!N result;
+            static if (N == 2 && is(double2)) {
+                (cast(double*)&result._components[0])[0..2] = (cast(double*)&data[offset])[0..2];
+            } else static if (N == 3 && is(double4)) {
+                (cast(double*)&result._components[0])[0..3] = (cast(double*)&data[offset])[0..3];
+            } else {
+                (cast(double*)&result._components[0])[0..N] = (cast(double*)&data[offset])[0..N];
+            }
+            return result;
+        } else {
+            // Runtime dimension - read size then components
+            size_t size = *cast(size_t*)data.ptr;
+            offset += size_t.sizeof;
+            
+            auto result = Vector!N(size);
+            result._components[] = (cast(double[])(data[offset..offset + double.sizeof * size]))[];
+            return result;
+        }
+    }
+
     // Hadamard (element-wise) division
     Vector!N hadamardDiv(Vector!N other) const {
         static if (N > 0) {
