@@ -82,14 +82,14 @@ class ProcessManager {
         }
 }
 
-/// Unified state type that encapsulates both positions and multiplier
+/// Unified state type that encapsulates both positions and multipliers
 struct OptimizationState(V) {
     V[] positions;  // Current positions
-    double multiplier;  // Scalar multiplier for velocity constraints
+    DynamicVector multipliers;  // Vector of multipliers for constraints
 
-    // Total number of scalar components (positions * V.dimension + 1 multiplier)
+    // Total number of scalar components (positions * V.dimension + multipliers.dimension)
     size_t numComponents() const {
-        return positions.length * V.dimension + 1;
+        return positions.length * V.dimension + multipliers.dimension;
     }
 
     // Get component by linear index
@@ -99,7 +99,7 @@ struct OptimizationState(V) {
             size_t dimIndex = index % V.dimension;
             return positions[pointIndex][dimIndex];
         }
-        return multiplier;
+        return multipliers[index - positions.length * V.dimension];
     }
 
     // Set component by linear index
@@ -118,14 +118,15 @@ struct OptimizationState(V) {
             else static if (op == "/") 
                 positions[pointIndex][dimIndex] /= value;
         } else {
+            size_t multiplierIndex = index - positions.length * V.dimension;
             static if (op == "+") 
-                multiplier += value;
+                multipliers[multiplierIndex] += value;
             else static if (op == "-") 
-                multiplier -= value;
+                multipliers[multiplierIndex] -= value;
             else static if (op == "*") 
-                multiplier *= value;
+                multipliers[multiplierIndex] *= value;
             else static if (op == "/") 
-                multiplier /= value;
+                multipliers[multiplierIndex] /= value;
         }
         return opIndex(index);
     }
@@ -137,35 +138,41 @@ struct OptimizationState(V) {
             size_t dimIndex = index % V.dimension;
             positions[pointIndex][dimIndex] = value;
         } else {
-            multiplier = value;
+            multipliers[index - positions.length * V.dimension] = value;
         }
         return value;
     }
 
-    this(V[] pos, double mult = 0.0) {
+    this(V[] pos, size_t numConstraints) {
         positions = pos;
-        multiplier = mult;
+        multipliers = DynamicVector(numConstraints);  // Initialize with zeros
+    }
+    
+    this(V[] pos, DynamicVector mult) {
+        positions = pos;
+        multipliers = mult;
     }
 
     OptimizationState!V dup() const {
-        return OptimizationState!V(positions.dup, multiplier);
+        auto result = OptimizationState!V(positions.dup, multipliers.dup);
+        return result;
     }
 
     OptimizationState!V opBinary(string op)(const OptimizationState!V other) const
         if (op == "+" || op == "-")
     {
         assert(numComponents == other.numComponents, "Dimension mismatch");
-        auto result = OptimizationState!V(new V[positions.length]);
+        auto result = OptimizationState!V(new V[positions.length], multipliers.dimension);
         static if (op == "+") {
             foreach (i; 0..positions.length) {
                 result.positions[i] = positions[i] + other.positions[i];
             }
-            result.multiplier = multiplier + other.multiplier;
+            result.multipliers = multipliers + other.multipliers;
         } else static if (op == "-") {
             foreach (i; 0..positions.length) {
                 result.positions[i] = positions[i] - other.positions[i];
             }
-            result.multiplier = multiplier - other.multiplier;
+            result.multipliers = multipliers - other.multipliers;
         }
         return result;
     }
@@ -173,26 +180,27 @@ struct OptimizationState(V) {
     OptimizationState!V opBinary(string op)(double scalar) const
         if (op == "*" || op == "/")
     {
-        auto result = OptimizationState!V(new V[positions.length]);
+        auto result = OptimizationState!V(new V[positions.length], multipliers.dimension);
         static if (op == "*") {
             foreach (i; 0..positions.length) {
                 result.positions[i] = positions[i] * scalar;
             }
-            result.multiplier = multiplier * scalar;
+            result.multipliers = multipliers * scalar;
         } else static if (op == "/") {
             foreach (i; 0..positions.length) {
                 result.positions[i] = positions[i] / scalar;
             }
-            result.multiplier = multiplier / scalar;
+            result.multipliers = multipliers / scalar;
         }
         return result;
     }
 
     double magnitudeSquared() const {
-        double total = multiplier * multiplier;  // Include multiplier in magnitude
+        double total = 0.0;
         foreach (pos; positions) {
             total += pos.magnitudeSquared();
         }
+        total += multipliers.magnitudeSquared();
         return total;
     }
     
@@ -200,29 +208,32 @@ struct OptimizationState(V) {
         return sqrt(magnitudeSquared());
     }
 
-    static OptimizationState!V zero(size_t numPositions) {
-        auto result = OptimizationState!V(new V[numPositions]);
+    static OptimizationState!V zero(size_t numPositions, size_t numConstraints = 0) {
+        auto result = OptimizationState!V(new V[numPositions], DynamicVector.zero(numConstraints));
         foreach (ref pos; result.positions) {
             pos = V.zero();
         }
-        result.multiplier = 0.0;
+        // multipliers initialized to zero by default
         return result;
     }
 
     ubyte[] toBytes() const {
         ubyte[] buffer;
         
-        // Serialize multiplier
-        buffer ~= cast(ubyte[])(&multiplier)[0..double.sizeof];
+        // Add canary value
+        buffer ~= cast(ubyte)42;
         
         // Serialize positions array size
         size_t size = positions.length;
-        buffer ~= cast(ubyte[])(&size)[0..size_t.sizeof];
+        buffer ~= cast(ubyte[])(&size)[0..1];
         
-        // Serialize each vector using Vector's toBytes method
+        // Serialize each position vector
         foreach (pos; positions) {
             buffer ~= pos.toBytes();
         }
+        
+        // Serialize multipliers vector
+        buffer ~= multipliers.toBytes();
         
         return buffer;
     }
@@ -231,29 +242,37 @@ struct OptimizationState(V) {
         queue.send(this.toBytes());
     }
         
-    static OptimizationState!V fromBytes(ubyte[] data) {
-        OptimizationState!V state;
+    static size_t fromBytes(ubyte[] data, ref OptimizationState!V target) {
         size_t offset = 0;
         
-        // Deserialize multiplier
-        state.multiplier = *cast(double*)(data.ptr + offset);
-        offset += double.sizeof;
+        // Check canary value
+        enforce(data[0] == 42, "Invalid canary value in serialized OptimizationState");
+        offset += 1;
         
-        // Deserialize positions array size
+        // Read positions array size
         size_t size = *cast(size_t*)(data.ptr + offset);
         offset += size_t.sizeof;
         
-        // Deserialize each vector using Vector's fromBytes method
-        state.positions = new V[size];
+        // Create new positions array and deserialize
+        auto positions = new V[size];
         foreach (i; 0..size) {
-            // Calculate the size of each vector's serialized data
-            auto vector_data = data[offset..$];
-            state.positions[i] = V.fromBytes(vector_data);
-            // Update offset by the size of the vector's data
-            offset += state.positions[i].toBytes().length;
+            offset += V.fromBytes(data[offset..$], positions[i]);
         }
         
-        return state;
+        // Create and deserialize new multipliers
+        auto multipliers = DynamicVector(0);
+        offset += DynamicVector.fromBytes(data[offset..$], multipliers);
+        
+        // Create new state using constructor
+        target = OptimizationState!V(positions, multipliers);
+        
+        return offset;
+    }
+
+    static OptimizationState!V fromBytes(ubyte[] data) {
+        OptimizationState!V result;
+        fromBytes(data, result);
+        return result;
     }
 
     static OptimizationState!V receive(JumboMessageQueue queue) {
@@ -285,17 +304,16 @@ private struct WorkerInput(V) {
 
     static WorkerInput!V fromBytes(ubyte[] data) {
         size_t offset = 0;
-
-        // Deserialize state
-        auto state = OptimizationState!V.fromBytes(data);
-        offset += state.toBytes().length;
-
-        // Deserialize energy and temperature
+        OptimizationState!V state;
+        
+        // Deserialize state using reference method
+        offset += OptimizationState!V.fromBytes(data, state);
+        
+        // Read energy and temperature
         double energy = *cast(double*)(data.ptr + offset);
         offset += double.sizeof;
-
         double temperature = *cast(double*)(data.ptr + offset);
-
+        
         return WorkerInput!V(state, energy, temperature);
     }
 
@@ -327,14 +345,14 @@ private struct WorkerResult(V) {
 
     static WorkerResult!V fromBytes(ubyte[] data) {
         size_t offset = 0;
-
-        // Deserialize state
-        auto state = OptimizationState!V.fromBytes(data);
-        offset += state.toBytes().length;
-
-        // Deserialize energy
+        OptimizationState!V state;
+        
+        // Deserialize state using reference method
+        offset += OptimizationState!V.fromBytes(data, state);
+        
+        // Read energy
         double energy = *cast(double*)(data.ptr + offset);
-
+        
         return WorkerResult!V(state, energy);
     }
 
@@ -832,9 +850,9 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
             OptimizationState!V state;
             OptimizationState!V velocity;
             
-            this(size_t numPositions) {
-                state = OptimizationState!V.zero(numPositions);
-                velocity = OptimizationState!V.zero(numPositions);
+            this(size_t numPositions, size_t numConstraints) {
+                state = OptimizationState!V.zero(numPositions, numConstraints);
+                velocity = OptimizationState!V.zero(numPositions, numConstraints);
             }
         }
 
@@ -844,7 +862,8 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
             ObjectiveFunction!(T, V) objective
         ) {
             const size_t numPoints = current.state.positions.length;
-            auto result = OptimizationState!V.zero(numPoints);
+            const size_t numConstraints = current.state.multipliers.dimension;
+            auto result = OptimizationState!V.zero(numPoints, numConstraints);
 
             // Create single queue for all gradient components
             string queueName = format("/gradient_%d_%s", 
@@ -985,7 +1004,7 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
             ObjectiveFunction!(T, V) objective
         ) {
             // Initialize state with velocity
-            auto state = StateWithVelocity(initialState.positions.length);
+            auto state = StateWithVelocity(initialState.positions.length, initialState.multipliers.dimension);
             state.state = initialState.dup;
 
             StateWithVelocity previousState;
@@ -1043,8 +1062,8 @@ class GradientDescentSolver(T, V) : OptimizationSolver!(T, V) {
                         "Gradient Magnitude: %s, Step size: %s, Multiplier Value: %s, Multiplier Partial: %s, Lagrangian: %s", 
                         totalMagnitude, 
                         step,
-                        state.state.multiplier,
-                        gradient.multiplier,
+                        state.state.multipliers.magnitude,
+                        gradient.multipliers.magnitude,
                         currentValue
                     );
                 }

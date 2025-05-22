@@ -6,7 +6,7 @@ import core.optimization;
 import math.vector;
 import std.math : abs;
 
-import core.velocity_constraint : VelocityConstraint, SystemVelocityConstraint;
+import core.velocity_constraint : VelocityConstraint, SystemVelocityConstraint, ConstraintTerm;
 
 // System Lagrangian implementation
 class SystemLagrangian(T, V) : ObjectiveFunction!(T, V) if (isMaterialPoint!(T, V)) {
@@ -15,6 +15,7 @@ class SystemLagrangian(T, V) : ObjectiveFunction!(T, V) if (isMaterialPoint!(T, 
         double _timeStep;
         V[] _currentPositions;
         V[] _proposedVelocities;  // Cache for proposed velocities
+        ConstraintTerm!V[] _constraints;  // Array of individual constraint terms
         
     public:
         this(MaterialBody!(T, V) body, double timeStep) {
@@ -27,6 +28,9 @@ class SystemLagrangian(T, V) : ObjectiveFunction!(T, V) if (isMaterialPoint!(T, 
             for (size_t i = 0; i < body.numPoints; ++i) {
                 _currentPositions[i] = body[i].position;
             }
+
+            // Get individual constraint terms
+            _constraints = SystemVelocityConstraint!(T,V).getSystemConstraints(body);
         }
         
         override double evaluate(OptimizationState!V state) {
@@ -51,20 +55,13 @@ class SystemLagrangian(T, V) : ObjectiveFunction!(T, V) if (isMaterialPoint!(T, 
                 );
             }
             
-            // Add system-wide velocity constraint contribution
-            double constraintViolation = SystemVelocityConstraint!(T,V).evaluateSystemConstraint(
-                _body,
-                _proposedVelocities
-            );
-            
-            debug {
-                // Print constraint violation for debugging
-                //writeln("Constraint violation: ", constraintViolation);
+            // Add contributions from each constraint with its own multiplier
+            for (size_t i = 0; i < _constraints.length; ++i) {
+                double violation = _constraints[i].evaluate(_proposedVelocities[_constraints[i].pointIndex]);
+                totalLagrangian -= state.multipliers[i] * violation;
             }
             
-            //return totalLagrangian - state.multiplier * constraintViolation;
-            return totalLagrangian - state.multiplier * constraintViolation * 1e6;
-            //return totalLagrangian + 1e23 * constraintViolation;
+            return totalLagrangian;
         }
 }
 
@@ -92,19 +89,11 @@ class LagrangianIntegrator(T, V) {
                 currentPositions[i] = point.position;
             }
             
-            // Optimize the system with initial multiplier of 0
-            // Calculate average mass for the body
-            double totalMass = 0.0;
-            size_t count = 0;
-            for (size_t i = 0; i < body.numPoints; ++i) {
-                auto point = body[i];
-                totalMass += point.mass;
-                count++;
-            }
-            double averageMass = totalMass / count;
+            // Get the number of constraints for initialization
+            auto constraints = SystemVelocityConstraint!(T,V).getSystemConstraints(body);
             
-            // Create initial state combining positions and multiplier
-            auto initialState = OptimizationState!V(currentPositions, averageMass);
+            // Create initial state with positions and zero multipliers
+            auto initialState = OptimizationState!V(currentPositions, DynamicVector.zero(constraints.length));
             
             // Call minimize with unified state
             auto result = _solver.minimize(
