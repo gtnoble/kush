@@ -5,14 +5,14 @@ import core.material_body;
 import core.material_point;
 import std.math : sqrt;
 
-// Individual constraint term for a point
+// Individual constraint term for a point's velocity component
 struct ConstraintTerm(V) if (is(V == Vector!N, size_t N)) {
-    size_t pointIndex;  // Which point this constraint applies to
-    V targetVelocity;   // Target velocity for this point
+    size_t pointIndex;      // Which point this constraint applies to
+    size_t componentIndex;  // Which component (x,y,z) this constraint applies to
+    double targetComponent; // Target velocity for this component
     
     double evaluate(V velocity) const {
-        V diff = velocity - targetVelocity;
-        return diff.magnitudeSquared();  // |v - v_target|²
+        return velocity[componentIndex] - targetComponent;  // Simple component difference
     }
 }
 
@@ -37,17 +37,22 @@ struct VelocityConstraint(V) if (is(V == Vector!N, size_t N)) {
 
 // System-wide velocity constraint functions
 struct SystemVelocityConstraint(T, V) if (isMaterialPoint!(T, V)) {
-    // Get array of individual constraint terms
+    // Get array of individual constraint terms - one per velocity component
     static ConstraintTerm!V[] getSystemConstraints(MaterialBody!(T, V) body) {
         ConstraintTerm!V[] terms;
         
-        // Only add velocity target constraints for points that have them
+        // Add component-wise constraints for points that have velocity targets
         for (size_t i = 0; i < body.numPoints; ++i) {
             if (body[i].velocityConstraint !is null) {
-                terms ~= ConstraintTerm!V(
-                    i,
-                    body[i].velocityConstraint.targetVelocity
-                );
+                auto targetVel = body[i].velocityConstraint.targetVelocity;
+                // Create a separate constraint for each component
+                foreach (j; 0..V.dimension) {
+                    terms ~= ConstraintTerm!V(
+                        i,           // point index
+                        j,           // component index
+                        targetVel[j] // target velocity component
+                    );
+                }
             }
         }
         

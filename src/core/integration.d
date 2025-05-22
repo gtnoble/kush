@@ -55,9 +55,11 @@ class SystemLagrangian(T, V) : ObjectiveFunction!(T, V) if (isMaterialPoint!(T, 
                 );
             }
             
-            // Add contributions from each constraint with its own multiplier
+            // Add contributions from each component-wise constraint with its multiplier
             for (size_t i = 0; i < _constraints.length; ++i) {
-                double violation = _constraints[i].evaluate(_proposedVelocities[_constraints[i].pointIndex]);
+                auto constraint = _constraints[i];
+                double violation = constraint.evaluate(_proposedVelocities[constraint.pointIndex]);
+                // Note: Each component's constraint contributes linearly to the Lagrangian
                 totalLagrangian -= state.multipliers[i] * violation;
             }
             

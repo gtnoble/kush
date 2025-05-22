@@ -464,7 +464,258 @@ OptimizationSolver!(T, V) createOptimizer(T, V)(
         );
     }
     
+    if (config.solver_type == "lbfgs") {
+        return new LBFGSSolver!(T, V)(
+            config.tolerance,
+            config.max_iterations,
+            config.lbfgs.memory_size,
+            config.lbfgs.initial_step.getEffectiveValue(horizon),
+            totalCPUs
+        );
+    }
     throw new Exception("Unknown solver type: " ~ config.solver_type);
+}
+
+/// Circular buffer for storing past optimization steps
+private struct CircularBuffer(T) {
+    private:
+        T[] _data;
+        size_t _start = 0;
+        size_t _length = 0;
+
+    public:
+        this(size_t capacity) {
+            _data = new T[capacity];
+        }
+
+        void push(T item) {
+            if (_length < _data.length) {
+                _data[_length++] = item;
+            } else {
+                _data[_start] = item;
+                _start = (_start + 1) % _data.length;
+            }
+        }
+
+        /// Access elements from newest to oldest
+        const(T) opIndex(size_t index) const {
+            enforce(index < _length, "Index out of bounds");
+            auto pos = (_start + _length - 1 - index) % _data.length;
+            return _data[pos];
+        }
+
+        size_t length() const { return _length; }
+        size_t capacity() const { return _data.length; }
+        void clear() { _length = 0; _start = 0; }
+}
+
+/**
+ * Limited-memory BFGS optimizer for large-scale optimization problems.
+ * Uses a history of past updates to approximate the inverse Hessian matrix.
+ *
+ * Features:
+ * - Limited memory usage via circular buffer of past updates
+ * - Two-loop recursion algorithm for efficient Hessian approximation
+ * - Parallel gradient computation
+ * - Initial Hessian scaling
+ *
+ * Configuration in JSON:
+ * {
+ *   "solver_type": "lbfgs",
+ *   "tolerance": 1e-6,
+ *   "max_iterations": 1000,
+ *   "lbfgs": {
+ *     "memory_size": 10,      // Number of past updates to store
+ *     "initial_step": {       // Initial Hessian scaling
+ *       "value": 1e-4,
+ *       "horizon_fraction": 0.001  // Optional
+ *     }
+ *   }
+ * }
+ */
+class LBFGSSolver(T, V) : OptimizationSolver!(T, V) {
+    private:
+        size_t _memorySize;
+        double _initialStep;
+        size_t _numWorkers;
+
+        // Store position and gradient differences
+        struct Update {
+            OptimizationState!V s;  // Position difference
+            OptimizationState!V y;  // Gradient difference
+            double rho;            // 1 / (y^T s)
+        }
+        
+        CircularBuffer!Update _history;
+        
+        // Calculate two-loop recursion direction
+        OptimizationState!V twoLoopRecursion(
+            const OptimizationState!V gradient,
+            const CircularBuffer!Update history
+        ) {
+            auto q = gradient.dup;
+            auto alpha = new double[history.length];
+            
+            // First loop
+            foreach (i; 0..history.length) {
+                auto update = history[i];
+                alpha[i] = update.rho * dotProduct(update.s, q);
+                q = q - update.y * alpha[i];
+            }
+            
+            // Initial Hessian approximation
+            if (history.length > 0) {
+                auto latest = history[0];
+                double y_dot_y = dotProduct(latest.y, latest.y);
+                double scale = dotProduct(latest.s, latest.y) / y_dot_y;
+                q = q * scale;
+            } else {
+                q = q * _initialStep;
+            }
+            
+            // Second loop
+            foreach_reverse (i; 0..history.length) {
+                auto update = history[i];
+                double beta = update.rho * dotProduct(update.y, q);
+                q = q + update.s * (alpha[i] - beta);
+            }
+            
+            return q;
+        }
+        
+        // Helper for dot product calculation
+        static double dotProduct(const OptimizationState!V a, const OptimizationState!V b) {
+            double result = 0.0;
+            foreach (i; 0..a.numComponents) {
+                result += a[i] * b[i];
+            }
+            return result;
+        }
+        
+        // Calculate gradient using parallel workers
+        OptimizationState!V calculateGradient(
+            const OptimizationState!V state,
+            ObjectiveFunction!(T, V) objective
+        ) {
+            const size_t numPoints = state.positions.length;
+            const size_t numConstraints = state.multipliers.dimension;
+            auto result = OptimizationState!V.zero(numPoints, numConstraints);
+
+            // Create queue for gradient components
+            string queueName = format("/lbfgs_gradient_%d_%s", 
+                thisProcessID(), 
+                randomUUID().toString()[0..8]);
+            auto gradientQueue = new JumboMessageQueue(queueName);
+            scope(exit) JumboMessageQueue.cleanup(queueName);
+
+            auto pids = new pid_t[_numWorkers];
+
+            // Spawn worker processes
+            foreach (i; 0.._numWorkers) {
+                pids[i] = fork();
+                if (pids[i] == 0) {
+                    auto queue = new JumboMessageQueue(queueName);
+                    
+                    // Process components assigned to this worker
+                    for (size_t idx = i; idx < state.numComponents; idx += _numWorkers) {
+                        // Use central difference for gradient
+                        auto plus = state.dup;
+                        auto minus = state.dup;
+                        double h = sqrt(double.epsilon) * max(abs(state[idx]), 1.0);
+                        
+                        plus[idx] += h;
+                        minus[idx] -= h;
+                        
+                        double derivative = (objective.evaluate(plus) - objective.evaluate(minus)) / (2 * h);
+                        
+                        auto msg = GradientMessage(i, idx, derivative);
+                        msg.send(queue);
+                    }
+                    exit(0);
+                }
+            }
+
+            // Collect gradient components
+            size_t totalComponents = state.numComponents;
+            for (size_t received = 0; received < totalComponents; received++) {
+                auto msg = GradientMessage.receive(gradientQueue);
+                result[msg.index] = msg.value;
+            }
+
+            // Cleanup workers
+            foreach (pid; pids) {
+                if (pid != 0) {
+                    wait(null);
+                }
+            }
+            
+            return result;
+        }
+
+    public:
+        this(double tolerance = 1e-6, size_t maxIterations = 1000,
+             size_t memorySize = 10, double initialStep = 1e-4,
+             size_t numWorkers = totalCPUs) {
+            super(tolerance, maxIterations);
+            _memorySize = memorySize;
+            _initialStep = initialStep;
+            _numWorkers = numWorkers;
+            _history = CircularBuffer!Update(memorySize);
+        }
+        
+        override OptimizationState!V minimize(
+            OptimizationState!V initialState,
+            ObjectiveFunction!(T, V) objective
+        ) {
+            auto currentState = initialState.dup;
+            double currentValue = objective.evaluate(currentState);
+            double previousValue;
+            
+            OptimizationState!V currentGradient;
+            OptimizationState!V previousState;
+            OptimizationState!V previousGradient;
+            
+            // Main optimization loop
+            for (size_t iter = 0; iter < _maxIterations; ++iter) {
+                previousValue = currentValue;
+                currentGradient = calculateGradient(currentState, objective);
+                
+                if (iter > 0) {
+                    // Update history
+                    auto s = currentState - previousState;
+                    auto y = currentGradient - previousGradient;
+                    double s_dot_y = dotProduct(s, y);
+                    
+                    // Skip update if s_dot_y is too small
+                    if (abs(s_dot_y) > double.epsilon * s.magnitude * y.magnitude) {
+                        _history.push(Update(s, y, 1.0 / s_dot_y));
+                    }
+                }
+                
+                // Calculate search direction
+                auto direction = twoLoopRecursion(currentGradient, _history);
+                
+                // Line search
+                double step = 1.0;
+                previousState = currentState.dup;
+                previousGradient = currentGradient;
+                
+                currentState = currentState - direction * step;
+                currentValue = objective.evaluate(currentState);
+                
+                debug {
+                    writefln("Iteration %d: value = %g, gradient = %g", 
+                        iter, currentValue, currentGradient.magnitude);
+                }
+                
+                // Check convergence
+                if (iter > 0 && abs((currentValue - previousValue) / previousValue) <= _tolerance) {
+                    break;
+                }
+            }
+            
+            return currentState;
+        }
 }
 
 // Interface for optimization objective functions

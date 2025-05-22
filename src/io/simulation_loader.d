@@ -69,8 +69,15 @@ struct GradientDescent {
 struct OptimizationConfig {
     double tolerance = 1e-6;
     int max_iterations = 10;
-    string solver_type = "gradient_descent";  // "gradient_descent" or "parallel_tempering"
+    string solver_type = "gradient_descent";  // "gradient_descent", "parallel_tempering", or "lbfgs"
     GradientDescent gradient_descent;
+    
+    /// L-BFGS specific settings
+    struct LBFGSConfig {
+        size_t memory_size = 10;     // Number of past updates to store
+        StepSize initial_step;       // Initial Hessian scaling
+    }
+    LBFGSConfig lbfgs;
 
     size_t getNumReplicas() const {
         import std.parallelism : totalCPUs;
@@ -181,8 +188,9 @@ private OptimizationConfig parseOptimizationConfig(JSONValue json) {
     if ("solver_type" in json) {
         config.solver_type = json["solver_type"].get!string;
         enforce(config.solver_type == "gradient_descent" || 
-               config.solver_type == "parallel_tempering",
-            "Solver type must be 'gradient_descent' or 'parallel_tempering'");
+               config.solver_type == "parallel_tempering" ||
+               config.solver_type == "lbfgs",
+            "Solver type must be 'gradient_descent', 'parallel_tempering', or 'lbfgs'");
     }
     
     // Parse tolerance
@@ -259,6 +267,32 @@ private OptimizationConfig parseOptimizationConfig(JSONValue json) {
         parseStepSize("min_step", config.gradient_descent.min_step);
         parseStepSize("max_step", config.gradient_descent.max_step);
         parseStepSize("gradient_step_size", config.gradient_descent.gradient_step_size);
+    }
+
+    // Parse L-BFGS settings
+    if ("lbfgs" in json) {
+        auto lbfgs = json["lbfgs"];
+        
+        if ("memory_size" in lbfgs) {
+            config.lbfgs.memory_size = lbfgs["memory_size"].get!size_t;
+            enforce(config.lbfgs.memory_size > 0,
+                "L-BFGS memory size must be positive");
+        }
+        
+        // Parse initial step size
+        if ("initial_step" in lbfgs) {
+            auto step = lbfgs["initial_step"];
+            if ("value" in step) {
+                config.lbfgs.initial_step.value = step["value"].get!double;
+                enforce(config.lbfgs.initial_step.value > 0.0,
+                    "Initial step size value must be positive");
+            }
+            if ("horizon_fraction" in step) {
+                config.lbfgs.initial_step.horizon_fraction = step["horizon_fraction"].get!double;
+                enforce(config.lbfgs.initial_step.horizon_fraction > 0.0,
+                    "Horizon fraction must be positive");
+            }
+        }
     }
 
     if ("parallel_tempering" in json) {
