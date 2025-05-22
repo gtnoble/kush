@@ -163,7 +163,7 @@ private:
         double minWaveSpeed = loadedData.materials.calculateMinWaveSpeed();
         
         // Create solver using core optimizer factory
-        auto solver = createOptimizer!(BondBasedPoint!V, V)(
+        auto solver = createOptimizer!V(
             simConfig.optimization,
             simConfig.horizon
         );

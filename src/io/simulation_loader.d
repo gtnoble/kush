@@ -1,6 +1,5 @@
 module io.simulation_loader;
 
-import core.optimization : OptimizationSolver;
 import core.material_point : isMaterialPoint;
 import std.json;
 import std.stdio;
@@ -30,7 +29,6 @@ struct GradientDescent {
     /// Configuration for finite difference calculations
     struct FiniteDifferenceConfig {
         int order = 2;               // Order of accuracy (2, 4, 6, or 8)
-        double step_size = 1e-6;     // Step size for finite differences
     }
     FiniteDifferenceConfig finite_difference;
     
@@ -76,6 +74,12 @@ struct OptimizationConfig {
     struct LBFGSConfig {
         size_t memory_size = 10;     // Number of past updates to store
         StepSize initial_step;       // Initial Hessian scaling
+        
+        /// Configuration for finite difference calculations
+        struct FiniteDifferenceConfig {
+            int order = 2;               // Order of accuracy (2, 4, 6, or 8)
+        }
+        FiniteDifferenceConfig finite_difference;
     }
     LBFGSConfig lbfgs;
 
@@ -240,11 +244,6 @@ private OptimizationConfig parseOptimizationConfig(JSONValue json) {
                        config.gradient_descent.finite_difference.order <= 8,
                     "Finite difference order must be 2, 4, 6, or 8");
             }
-            if ("step_size" in fd) {
-                config.gradient_descent.finite_difference.step_size = fd["step_size"].get!double;
-                enforce(config.gradient_descent.finite_difference.step_size > 0.0,
-                    "Finite difference step size must be positive");
-            }
         }
 
         // Parse step sizes
@@ -291,6 +290,18 @@ private OptimizationConfig parseOptimizationConfig(JSONValue json) {
                 config.lbfgs.initial_step.horizon_fraction = step["horizon_fraction"].get!double;
                 enforce(config.lbfgs.initial_step.horizon_fraction > 0.0,
                     "Horizon fraction must be positive");
+            }
+        }
+        
+        // Parse finite difference order
+        if ("finite_difference" in lbfgs) {
+            auto fd = lbfgs["finite_difference"];
+            if ("order" in fd) {
+                config.lbfgs.finite_difference.order = fd["order"].get!int;
+                enforce(config.lbfgs.finite_difference.order >= 2 && 
+                       config.lbfgs.finite_difference.order % 2 == 0 &&
+                       config.lbfgs.finite_difference.order <= 8,
+                    "Finite difference order must be 2, 4, 6, or 8");
             }
         }
     }

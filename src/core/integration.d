@@ -8,79 +8,69 @@ import std.math : abs;
 
 import core.velocity_constraint : VelocityConstraint, SystemVelocityConstraint, ConstraintTerm;
 
-// System Lagrangian implementation
-class SystemLagrangian(T, V) : ObjectiveFunction!(T, V) if (isMaterialPoint!(T, V)) {
-    private:
-        MaterialBody!(T, V) _body;
-        double _timeStep;
-        V[] _currentPositions;
-        V[] _proposedVelocities;  // Cache for proposed velocities
-        ConstraintTerm!V[] _constraints;  // Array of individual constraint terms
-        
-    public:
-        this(MaterialBody!(T, V) body, double timeStep) {
-            _body = body;
-            _timeStep = timeStep;
-            
-            // Store current positions for velocity calculations
-            _currentPositions = new V[body.numPoints];
-            _proposedVelocities = new V[body.numPoints];
-            for (size_t i = 0; i < body.numPoints; ++i) {
-                _currentPositions[i] = body[i].position;
-            }
+// Create a system Lagrangian objective function
+ObjectiveFunction!V createSystemLagrangian(T, V)(MaterialBody!(T, V) body, double timeStep) if (isVector!V) {
+    // Capture state in closure
+    auto currentPositions = new V[body.numPoints];
+    auto proposedVelocities = new V[body.numPoints];
+    
+    // Initialize current positions
+    for (size_t i = 0; i < body.numPoints; ++i) {
+        currentPositions[i] = body[i].position;
+    }
 
-            // Get individual constraint terms
-            _constraints = SystemVelocityConstraint!(T,V).getSystemConstraints(body);
+    // Get constraint terms
+    auto constraints = SystemVelocityConstraint!(T,V).getSystemConstraints(body);
+    
+    // Return objective function delegate
+    return (const OptimizationState!V state) {
+        double totalLagrangian = 0.0;
+        
+        T[] neighbors;
+        // Calculate proposed velocities from state
+        for (size_t i = 0; i < body.numPoints; ++i) {
+            proposedVelocities[i] = (state.positions[i] - currentPositions[i]) / timeStep;
         }
         
-        override double evaluate(OptimizationState!V state) {
-            double totalLagrangian = 0.0;
+        // For each point, compute its contribution
+        for (size_t i = 0; i < body.numPoints; ++i) {
+            auto point = body[i];
+            body.neighbors(i, neighbors);
             
-            T[] neighbors;
-            // Calculate proposed velocities from state
-            for (size_t i = 0; i < _body.numPoints; ++i) {
-                _proposedVelocities[i] = (state.positions[i] - _currentPositions[i]) / _timeStep;
-            }
-            
-            // For each point, compute its contribution
-            for (size_t i = 0; i < _body.numPoints; ++i) {
-                auto point = _body[i];
-                _body.neighbors(i, neighbors);
-                
-                // Compute regular Lagrangian
-                totalLagrangian += point.computeLagrangian(
-                    neighbors, 
-                    state.positions[i], 
-                    _timeStep
-                );
-            }
-            
-            // Add contributions from each component-wise constraint with its multiplier
-            for (size_t i = 0; i < _constraints.length; ++i) {
-                auto constraint = _constraints[i];
-                double violation = constraint.evaluate(_proposedVelocities[constraint.pointIndex]);
-                // Note: Each component's constraint contributes linearly to the Lagrangian
-                totalLagrangian -= state.multipliers[i] * violation;
-            }
-            
-            return totalLagrangian;
+            // Compute regular Lagrangian
+            totalLagrangian += point.computeLagrangian(
+                neighbors, 
+                state.positions[i], 
+                timeStep
+            );
         }
+        
+        // Add contributions from each component-wise constraint with its multiplier
+        for (size_t i = 0; i < constraints.length; ++i) {
+            auto constraint = constraints[i];
+            double violation = constraint.evaluate(proposedVelocities[constraint.pointIndex]);
+            // Note: Each component's constraint contributes linearly to the Lagrangian
+            totalLagrangian -= state.multipliers[i] * violation;
+        }
+        
+        return totalLagrangian;
+    };
 }
 
 // Lagrangian integration strategy
 // Core integration class that uses optimization to solve the Lagrangian equations of motion
 class LagrangianIntegrator(T, V) {
     private:
-        OptimizationSolver!(T, V) _solver;
+        Minimizer!V _solver;
         
     public:
-        this(OptimizationSolver!(T, V) solver) {
+        this(Minimizer!V solver) {
             _solver = solver;
         }
         
         void integrate(MaterialBody!(T, V) body, double timeStep) {
             // Create objective function
-            auto objective = new SystemLagrangian!(T, V)(body, timeStep);
+            auto objective = createSystemLagrangian!(T, V)(body, timeStep);
             
             // Get current positions
             V[] currentPositions = new V[body.numPoints];
@@ -98,7 +88,7 @@ class LagrangianIntegrator(T, V) {
             auto initialState = OptimizationState!V(currentPositions, DynamicVector.zero(constraints.length));
             
             // Call minimize with unified state
-            auto result = _solver.minimize(
+            auto result = _solver(
                 initialState,
                 objective
             );
