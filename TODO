@@ -1,2 +1,1 @@
-Run simulation and debug
-Standard deviation not being propagated to the parallel tempering solver
+Fix compilation issues associated with Vector type refactor.
