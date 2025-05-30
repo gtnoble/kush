@@ -19,13 +19,13 @@ class MaterialBody(T, V) if (isMaterialPoint!(T, V)) {
     private NeighborCache[] neighborCache;  // Cache for each point's neighbors
     
     // Spatial grid based on dimension
-    static if (V.dimension == 1) {
+    static if (V.length == 1) {
         private size_t[][long] grid;      // 1D: x -> [point indices]
     }
-    else static if (V.dimension == 2) {
+    else static if (V.length == 2) {
         private size_t[][long][long] grid; // 2D: x -> y -> [point indices]
     }
-    else static if (V.dimension == 3) {
+    else static if (V.length == 3) {
         private size_t[][long][long][long] grid; // 3D: x -> y -> z -> [point indices]
     }
     
@@ -44,11 +44,11 @@ class MaterialBody(T, V) if (isMaterialPoint!(T, V)) {
     
     // Calculate optimal cell size based on dimension
     private double getOptimalCellSize() const {
-        static if (V.dimension == 1)
+        static if (V.length == 1)
             return horizon;  // 1D case
-        else static if (V.dimension == 2)
+        else static if (V.length == 2)
             return horizon / sqrt(2.0);  // 2D optimal
-        else static if (V.dimension == 3)
+        else static if (V.length == 3)
             return horizon / sqrt(3.0);  // 3D optimal
     }
     
@@ -59,16 +59,7 @@ class MaterialBody(T, V) if (isMaterialPoint!(T, V)) {
             cache.isValid = false;
         }
 
-        // Clear existing grid
-        static if (V.dimension == 1) {
-            grid = null;
-        }
-        else static if (V.dimension == 2) {
-            grid = null;
-        }
-        else static if (V.dimension == 3) {
-            grid = null;
-        }
+        grid = null;
         
         cellSize = getOptimalCellSize();
         
@@ -77,17 +68,17 @@ class MaterialBody(T, V) if (isMaterialPoint!(T, V)) {
             auto pos = point.position;
             long x = cast(long)(pos[0] / cellSize);
             
-            static if (V.dimension == 1) {
+            static if (V.length == 1) {
                 if (x !in grid) grid[x] = [];
                 grid[x] ~= i;
             }
-            else static if (V.dimension == 2) {
+            else static if (V.length == 2) {
                 long y = cast(long)(pos[1] / cellSize);
                 if (x !in grid) grid[x] = typeof(grid[x]).init;
                 if (y !in grid[x]) grid[x][y] = [];
                 grid[x][y] ~= i;
             }
-            else static if (V.dimension == 3) {
+            else static if (V.length == 3) {
                 long y = cast(long)(pos[1] / cellSize);
                 long z = cast(long)(pos[2] / cellSize);
                 if (x !in grid) grid[x] = typeof(grid[x]).init;
@@ -102,13 +93,13 @@ class MaterialBody(T, V) if (isMaterialPoint!(T, V)) {
     
     // Helper to get points in a cell
     private const(size_t)[] getPointsInCell(long x, long y = 0, long z = 0) const {
-        static if (V.dimension == 1) {
+        static if (V.length == 1) {
             return (x in grid) ? grid[x] : [];
         }
-        else static if (V.dimension == 2) {
+        else static if (V.length == 2) {
             return (x in grid && y in grid[x]) ? grid[x][y] : [];
         }
-        else static if (V.dimension == 3) {
+        else static if (V.length == 3) {
             return (x in grid && y in grid[x] && z in grid[x][y]) ? 
                 grid[x][y][z] : [];
         }
@@ -135,7 +126,7 @@ class MaterialBody(T, V) if (isMaterialPoint!(T, V)) {
         // Get cell coordinates for current point
         long x = cast(long)(pos[0] / cellSize);
         
-        static if (V.dimension == 1) {
+        static if (V.length == 1) {
             // Check neighboring cells in 1D
             foreach (dx; -1..2) {
                 foreach (neighborIndex; getPointsInCell(x + dx)) {
@@ -151,7 +142,7 @@ class MaterialBody(T, V) if (isMaterialPoint!(T, V)) {
             neighborCache[index].neighbors = result.dup;
             neighborCache[index].isValid = true;
         }
-        else static if (V.dimension == 2) {
+        else static if (V.length == 2) {
             long y = cast(long)(pos[1] / cellSize);
             
             // Check neighboring cells in 2D
@@ -171,7 +162,7 @@ class MaterialBody(T, V) if (isMaterialPoint!(T, V)) {
             neighborCache[index].neighbors = result.dup;
             neighborCache[index].isValid = true;
         }
-        else static if (V.dimension == 3) {
+        else static if (V.length == 3) {
             long y = cast(long)(pos[1] / cellSize);
             long z = cast(long)(pos[2] / cellSize);
             
@@ -219,7 +210,7 @@ class MaterialBody(T, V) if (isMaterialPoint!(T, V)) {
         V pos = point.position;
         long x = cast(long)(pos[0] / cellSize);
         
-        static if (V.dimension == 1) {
+        static if (V.length == 1) {
             foreach (dx; -1..2) {
                 foreach (neighborIndex; getPointsInCell(x + dx)) {
                     if (neighborIndex != index) {
@@ -228,7 +219,7 @@ class MaterialBody(T, V) if (isMaterialPoint!(T, V)) {
                 }
             }
         }
-        else static if (V.dimension == 2) {
+        else static if (V.length == 2) {
             long y = cast(long)(pos[1] / cellSize);
             foreach (dx; -1..2)
             foreach (dy; -1..2) {
@@ -239,7 +230,7 @@ class MaterialBody(T, V) if (isMaterialPoint!(T, V)) {
                 }
             }
         }
-        else static if (V.dimension == 3) {
+        else static if (V.length == 3) {
             long y = cast(long)(pos[1] / cellSize);
             long z = cast(long)(pos[2] / cellSize);
             foreach (dx; -1..2)
@@ -259,11 +250,11 @@ class MaterialBody(T, V) if (isMaterialPoint!(T, V)) {
         auto f = File(filename, "w");
         
         // Write header
-        static if (V.dimension == 1) {
+        static if (V.length == 1) {
             f.writeln("x,x_ref,vx");
-        } else static if (V.dimension == 2) {
+        } else static if (V.length == 2) {
             f.writeln("x,y,x_ref,y_ref,vx,vy");
-        } else static if (V.dimension == 3) {
+        } else static if (V.length == 3) {
             f.writeln("x,y,z,x_ref,y_ref,z_ref,vx,vy,vz");
         }
         
@@ -272,17 +263,17 @@ class MaterialBody(T, V) if (isMaterialPoint!(T, V)) {
             auto pos = point.position;
             auto ref_pos = point.referencePosition;
             
-            static if (V.dimension == 1) {
+            static if (V.length == 1) {
                 auto vel = point.velocity;
                 f.writefln("%g,%g,%g", 
                     pos[0], ref_pos[0], vel[0]);
-            } else static if (V.dimension == 2) {
+            } else static if (V.length == 2) {
                 auto vel = point.velocity;
                 f.writefln("%g,%g,%g,%g,%g,%g",
                     pos[0], pos[1], 
                     ref_pos[0], ref_pos[1],
                     vel[0], vel[1]);
-            } else static if (V.dimension == 3) {
+            } else static if (V.length == 3) {
                 auto vel = point.velocity;
                 f.writefln("%g,%g,%g,%g,%g,%g,%g,%g,%g",
                     pos[0], pos[1], pos[2],

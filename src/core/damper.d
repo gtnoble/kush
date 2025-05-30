@@ -1,7 +1,6 @@
 module core.damper;
 
 import math.vector;
-import core.material_point : isVector;
 import std.math : abs, isNaN;
 
 // Unified damper interface that handles both global and bond damping

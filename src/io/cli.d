@@ -99,9 +99,9 @@ struct SimulationRunner {
         
         // Match on dimension and run appropriate simulation
         loadedData.match!(
-            (LoadedPoints!Vector1D p) => runWithPoints(p),
-            (LoadedPoints!Vector2D p) => runWithPoints(p),
-            (LoadedPoints!Vector3D p) => runWithPoints(p)
+            (LoadedPoints!(Vector1D!double) p) => runWithPoints(p),
+            (LoadedPoints!(Vector2D!double) p) => runWithPoints(p),
+            (LoadedPoints!(Vector3D!double) p) => runWithPoints(p)
         );
     }
 
@@ -109,7 +109,7 @@ private:
     /// Process loaded points of any dimension
     private void runWithPoints(V)(LoadedPoints!V loadedData) {
         
-        writefln("Running %dD simulation...", V.dimension);
+        writefln("Running %dD simulation...", V.length);
         writefln("- Points: %s", options.points_file);
         writefln("- Materials: %s", options.materials_file);
         writefln("- Simulation: %s", options.simulation_file);
@@ -216,9 +216,9 @@ private:
     // Calculate bond stiffness (derived from elastic properties)
     double calculateBondStiffness(V)(double youngsModulus, double horizon) {
         import std.math : PI;
-        static if (V.dimension == 1) {
+        static if (V.length == 1) {
             return youngsModulus / (horizon * horizon);
-        } else static if (V.dimension == 2) {
+        } else static if (V.length == 2) {
             return 6.0 * youngsModulus / (PI * horizon * horizon * horizon);
         } else {
             return 9.0 * youngsModulus / (PI * horizon * horizon * horizon * horizon);

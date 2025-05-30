@@ -4,7 +4,7 @@ import core.material_body;
 import core.material_point;
 import core.optimization;
 import math.vector;
-import std.math : abs;
+import std.math : abs, asinh;
 
 import core.velocity_constraint : VelocityConstraint, SystemVelocityConstraint, ConstraintTerm;
 
@@ -53,7 +53,8 @@ ObjectiveFunction!V createSystemLagrangian(T, V)(MaterialBody!(T, V) body, doubl
             totalLagrangian -= state.multipliers[i] * violation;
         }
         
-        return totalLagrangian;
+        //return totalLagrangian;
+        return asinh(totalLagrangian);
     };
 }
 
@@ -85,7 +86,7 @@ class LagrangianIntegrator(T, V) {
             auto constraints = SystemVelocityConstraint!(T,V).getSystemConstraints(body);
             
             // Create initial state with positions and zero multipliers
-            auto initialState = OptimizationState!V(currentPositions, DynamicVector.zero(constraints.length));
+            auto initialState = OptimizationState!V(currentPositions, DynamicVector!double.zero(constraints.length));
             
             // Call minimize with unified state
             auto result = _solver(

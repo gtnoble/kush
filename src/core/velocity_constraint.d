@@ -6,7 +6,7 @@ import core.material_point;
 import std.math : sqrt;
 
 // Individual constraint term for a point's velocity component
-struct ConstraintTerm(V) if (is(V == Vector!N, size_t N)) {
+struct ConstraintTerm(V) if (isVector!V) {
     size_t pointIndex;      // Which point this constraint applies to
     size_t componentIndex;  // Which component (x,y,z) this constraint applies to
     double targetComponent; // Target velocity for this component
@@ -17,7 +17,7 @@ struct ConstraintTerm(V) if (is(V == Vector!N, size_t N)) {
 }
 
 // Velocity constraint for a single point
-struct VelocityConstraint(V) if (is(V == Vector!N, size_t N)) {
+struct VelocityConstraint(V) if (isVector!V) {
     private:
         V _targetVelocity;   // Target velocity vector
 
@@ -46,7 +46,7 @@ struct SystemVelocityConstraint(T, V) if (isMaterialPoint!(T, V)) {
             if (body[i].velocityConstraint !is null) {
                 auto targetVel = body[i].velocityConstraint.targetVelocity;
                 // Create a separate constraint for each component
-                foreach (j; 0..V.dimension) {
+                foreach (j; 0..V.length) {
                     terms ~= ConstraintTerm!V(
                         i,           // point index
                         j,           // component index

@@ -4,7 +4,7 @@ import core.material_point;
 import math.vector;
 import std.math : abs, sqrt, exp;
 import std.math.traits : isNaN;
-import std.algorithm : min, max;
+import std.algorithm : min, max, map, sum;
 import core.thread : Thread;
 import core.time : dur;
 import std.array;
@@ -85,30 +85,30 @@ class ProcessManager {
 /// Unified state type that encapsulates both positions and multipliers
 struct OptimizationState(V) {
     V[] positions;  // Current positions
-    DynamicVector multipliers;  // Vector of multipliers for constraints
+    DynamicVector!double multipliers;  // Vector of multipliers for constraints
 
-    // Total number of scalar components (positions * V.dimension + multipliers.dimension)
+    // Total number of scalar components (positions * V.length + multipliers.length)
     size_t numComponents() const {
-        return positions.length * V.dimension + multipliers.dimension;
+        return positions.length * V.length + multipliers.length;
     }
 
     // Get component by linear index
     double opIndex(size_t index) const {
-        if (index < positions.length * V.dimension) {
-            size_t pointIndex = index / V.dimension;
-            size_t dimIndex = index % V.dimension;
+        if (index < positions.length * V.length) {
+            size_t pointIndex = index / V.length;
+            size_t dimIndex = index % V.length;
             return positions[pointIndex][dimIndex];
         }
-        return multipliers[index - positions.length * V.dimension];
+        return multipliers[index - positions.length * V.length];
     }
 
     // Set component by linear index
     double opIndexOpAssign(string op)(double value, size_t index)
         if (op == "+" || op == "-" || op == "*" || op == "/")
     {
-        if (index < positions.length * V.dimension) {
-            size_t pointIndex = index / V.dimension;
-            size_t dimIndex = index % V.dimension;
+        if (index < positions.length * V.length) {
+            size_t pointIndex = index / V.length;
+            size_t dimIndex = index % V.length;
             static if (op == "+") 
                 positions[pointIndex][dimIndex] += value;
             else static if (op == "-") 
@@ -118,7 +118,7 @@ struct OptimizationState(V) {
             else static if (op == "/") 
                 positions[pointIndex][dimIndex] /= value;
         } else {
-            size_t multiplierIndex = index - positions.length * V.dimension;
+            size_t multiplierIndex = index - positions.length * V.length;
             static if (op == "+") 
                 multipliers[multiplierIndex] += value;
             else static if (op == "-") 
@@ -133,22 +133,22 @@ struct OptimizationState(V) {
 
     // Basic assignment
     double opIndexAssign(double value, size_t index) {
-        if (index < positions.length * V.dimension) {
-            size_t pointIndex = index / V.dimension;
-            size_t dimIndex = index % V.dimension;
+        if (index < positions.length * V.length) {
+            size_t pointIndex = index / V.length;
+            size_t dimIndex = index % V.length;
             positions[pointIndex][dimIndex] = value;
         } else {
-            multipliers[index - positions.length * V.dimension] = value;
+            multipliers[index - positions.length * V.length] = value;
         }
         return value;
     }
 
     this(V[] pos, size_t numConstraints) {
         positions = pos;
-        multipliers = DynamicVector(numConstraints);  // Initialize with zeros
+        multipliers = DynamicVector!double(numConstraints);
     }
     
-    this(V[] pos, DynamicVector mult) {
+    this(V[] pos, DynamicVector!double mult) {
         positions = pos;
         multipliers = mult;
     }
@@ -162,7 +162,7 @@ struct OptimizationState(V) {
         if (op == "+" || op == "-")
     {
         assert(numComponents == other.numComponents, "Dimension mismatch");
-        auto result = OptimizationState!V(new V[positions.length], multipliers.dimension);
+        auto result = OptimizationState!V(new V[positions.length], multipliers.length);
         static if (op == "+") {
             foreach (i; 0..positions.length) {
                 result.positions[i] = positions[i] + other.positions[i];
@@ -180,7 +180,7 @@ struct OptimizationState(V) {
     OptimizationState!V opBinary(string op)(double scalar) const
         if (op == "*" || op == "/")
     {
-        auto result = OptimizationState!V(new V[positions.length], multipliers.dimension);
+        auto result = OptimizationState!V(new V[positions.length], multipliers.length);
         static if (op == "*") {
             foreach (i; 0..positions.length) {
                 result.positions[i] = positions[i] * scalar;
@@ -218,7 +218,7 @@ struct OptimizationState(V) {
     }
 
     static OptimizationState!V zero(size_t numPositions, size_t numConstraints = 0) {
-        auto result = OptimizationState!V(new V[numPositions], DynamicVector.zero(numConstraints));
+        auto result = OptimizationState!V(new V[numPositions], DynamicVector!double.zero(numConstraints));
         foreach (ref pos; result.positions) {
             pos = V.zero();
         }
@@ -269,8 +269,8 @@ struct OptimizationState(V) {
         }
         
         // Create and deserialize new multipliers
-        auto multipliers = DynamicVector(0);
-        offset += DynamicVector.fromBytes(data[offset..$], multipliers);
+        auto multipliers = DynamicVector!double(0);
+        offset += DynamicVector!double.fromBytes(data[offset..$], multipliers);
         
         // Create new state using constructor
         target = OptimizationState!V(positions, multipliers);
@@ -636,8 +636,14 @@ Minimizer!V createLBFGSMinimizer(V)(
             currentValue = objective(currentState);
             
             debug {
-                writefln("Iteration %d: value = %g, gradient = %g", 
-                    iter, currentValue, currentGradient.magnitude);
+                writefln(
+                    "Gradient Magnitude: %s, Position Partial Gradient: %s, Multiplier Value: %s, Multiplier Partial Gradient: %s, Lagrangian: %s", 
+                    currentGradient.magnitude, 
+                    currentGradient.positions.map!((value) => value.magnitudeSquared).sum.sqrt,
+                    currentState.multipliers.magnitude,
+                    currentGradient.multipliers.magnitude,
+                    currentValue
+                );
             }
             
             // Check convergence
@@ -666,6 +672,34 @@ private immutable double[][int] DIFFERENCE_COEFFS = [
     8: [1.0/280.0, -4.0/105.0, 1.0/5.0, -4.0/5.0, 0.0, 4.0/5.0, -1.0/5.0, 4.0/105.0, -1.0/280.0]
 ];
 
+// Calculate a single partial derivative using finite differences
+private double calculatePartialDerivative(V)(
+    const OptimizationState!V state,
+    ObjectiveFunction!V objective,
+    size_t componentIndex,
+    int finiteDifferenceOrder
+) if (isVector!V) {
+    // Get finite difference coefficients for current order
+    auto coeffs = DIFFERENCE_COEFFS[finiteDifferenceOrder];
+    int stencilLength = cast(int)coeffs.length;
+    int halfPoints = (stencilLength - 1) / 2;
+    
+    double step_size = sqrt(double.epsilon) * max(abs(state[componentIndex]), 1);
+    
+    // Calculate derivative using higher-order stencil
+    double derivative = 0.0;
+    for (int j = 0; j < stencilLength; j++) {
+        if (coeffs[j] == 0.0) continue;  // Skip center point if coefficient is 0
+        
+        auto eval_state = state.dup();
+        eval_state[componentIndex] += step_size * (j - halfPoints);
+        double eval = objective(eval_state);
+        derivative += coeffs[j] * eval;
+    }
+    
+    return derivative / step_size;
+}
+
 // Calculate gradient using parallel workers
 private OptimizationState!V calculateGradient(V)(
     const OptimizationState!V state,
@@ -674,7 +708,7 @@ private OptimizationState!V calculateGradient(V)(
     int finiteDifferenceOrder = 2
 ) if (isVector!V) {
     const size_t numPoints = state.positions.length;
-    const size_t numConstraints = state.multipliers.dimension;
+    const size_t numConstraints = state.multipliers.length;
     auto result = OptimizationState!V.zero(numPoints, numConstraints);
 
     // Create queue for gradient components
@@ -694,24 +728,7 @@ private OptimizationState!V calculateGradient(V)(
             
             // Process components assigned to this worker
             for (size_t idx = i; idx < state.numComponents; idx += numWorkers) {
-                // Get finite difference coefficients for current order
-                auto coeffs = DIFFERENCE_COEFFS[finiteDifferenceOrder];
-                int stencilLength = cast(int)coeffs.length;
-                int halfPoints = (stencilLength - 1) / 2;
-                
-                double step_size = sqrt(double.epsilon) * max(abs(state[idx]), 1);
-                // Calculate derivative using higher-order stencil
-                double derivative = 0.0;
-                for (int j = 0; j < stencilLength; j++) {
-                    if (coeffs[j] == 0.0) continue;  // Skip center point if coefficient is 0
-                    
-                    auto eval_state = state.dup();
-                    eval_state[idx] += step_size * (j - halfPoints);
-                    double eval = objective(eval_state);
-                    derivative += coeffs[j] * eval;
-                }
-                
-                derivative /= step_size;
+                double derivative = calculatePartialDerivative!V(state, objective, idx, finiteDifferenceOrder);
 
                 // Send result for this component
                 auto msg = GradientMessage(i, idx, derivative);
@@ -1127,7 +1144,7 @@ Minimizer!V createGradientDescentMinimizer(V)(
     return (const OptimizationState!V initialState, ObjectiveFunction!V objective) {
         // Initialize state with velocity
         OptimizationState!V state = initialState.dup;
-        OptimizationState!V velocity = OptimizationState!V.zero(initialState.positions.length, initialState.multipliers.dimension);
+        OptimizationState!V velocity = OptimizationState!V.zero(initialState.positions.length, initialState.multipliers.length);
 
         OptimizationState!V previousGradient;
         OptimizationState!V previousState;
@@ -1178,9 +1195,10 @@ Minimizer!V createGradientDescentMinimizer(V)(
 
             debug {
                 writefln(
-                    "Gradient Magnitude: %s, Step size: %s, Multiplier Value: %s, Multiplier Partial: %s, Lagrangian: %s", 
+                    "Gradient Magnitude: %s, Step size: %s, Position Partial Gradient: %s, Multiplier Value: %s, Multiplier Partial Gradient: %s, Lagrangian: %s", 
                     totalMagnitude, 
                     step,
+                    gradient.positions.map!((value) => value.magnitudeSquared).sum.sqrt,
                     state.multipliers.magnitude,
                     gradient.multipliers.magnitude,
                     value

@@ -114,15 +114,15 @@ private V parseVector(V)(JSONValue json) {
         "Vector must be a JSON array, got %s".format(json.type));
     
     auto arr = json.array;
-    enforce(arr.length == V.dimension, 
+    enforce(arr.length == V.length, 
         "Vector dimension mismatch: expected %d components, got %d"
-        .format(V.dimension, arr.length));
+        .format(V.length, arr.length));
     
-    static if (V.dimension == 1) {
+    static if (V.length == 1) {
         return V(arr[0].get!double);
-    } else static if (V.dimension == 2) {
+    } else static if (V.length == 2) {
         return V(arr[0].get!double, arr[1].get!double);
-    } else static if (V.dimension == 3) {
+    } else static if (V.length == 3) {
         return V(arr[0].get!double, arr[1].get!double, arr[2].get!double);
     }
 }
