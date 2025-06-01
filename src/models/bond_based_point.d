@@ -1,10 +1,11 @@
 module models.bond_based_point;
 
 import core.material_point;
-import core.damper : Damper;
+import core.damper;
 import core.velocity_constraint : VelocityConstraint;
 import math.vector;
-import std.math : abs;
+import std.math : abs, exp;
+import std.complex : exp;
 import std.typecons : Nullable;
 import std.exception : enforce;
 
@@ -73,61 +74,97 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
         _constantForce = constantForce;  // Start with zero force
     }
 
-    // Lagrangian calculation
-    double computeLagrangian(const(BondBasedPoint!V)[] neighbors, V proposedPosition, double timeStep) const {
-        // Kinetic energy T = (1/2)m((x2-x1)/dt)^2
-        V proposedVelocity = (proposedPosition - _position) / timeStep;
-        double kineticEnergy = 0.5 * _mass * proposedVelocity.magnitudeSquared();
+// Generic Lagrangian computation that works with both real and complex numbers
+T computeLagrangianGeneric(T)(const(BondBasedPoint!V)[] neighbors, Vector!(T, V.length) proposedPosition, double timeStep) const {
+    // Convert real position to match type of proposedPosition
+    auto pos = _position;
+    auto refPos = _referencePosition;
+    
+    // Kinetic energy
+    auto proposedVelocity = (proposedPosition - pos) / T(timeStep);
+    T kineticEnergy = T(0.5) * T(_mass) * proposedVelocity.magnitudeSquared();
+    
+    // Potential energy from bonds
+    T potentialEnergy = T(0);
+    foreach (neighbor; neighbors) {
+        // Convert neighbor positions to match type of proposedPosition
+        auto refVector = neighbor.referencePosition - refPos;
+        auto propVector = neighbor.position - proposedPosition;
         
-        // Potential energy from bonds
-        double potentialEnergy = 0.0;
-        foreach (neighbor; neighbors) {
-            // Calculate reference and proposed vectors
-            V refVector = neighbor.referencePosition - _referencePosition;
-            V propVector = neighbor._position - proposedPosition;
-            
-            double refLength = refVector.magnitude();
-            double propLength = propVector.magnitude();
-            
-            // Calculate stretch
-            double stretch = (propLength - refLength) / refLength;
-            
-            // Bond energy if not broken
-            if (abs(stretch) <= _criticalStretch) {
-                potentialEnergy += -0.5 * _bondStiffness * stretch * stretch;
-            }
-            else {
-                potentialEnergy += -0.5 * _bondStiffness * _criticalStretch * _criticalStretch; // Energy at critical stretch
-            }
-        }
+        auto refLength = refVector.magnitude();
+        auto propLength = propVector.magnitude();
         
-        // Calculate dissipation from damping
-        double totalDissipation = 0.0;
-        // Global damping dissipation
-        totalDissipation += _damper.calculateGlobalDissipation(proposedVelocity, _mass, timeStep);
+        // Calculate stretch
+        auto stretch = (propLength - refLength) / refLength;
+        auto c = T(_criticalStretch);
+        auto k = T(_bondStiffness);
         
-        // Bond damping dissipation
-        foreach (neighbor; neighbors) {
-            // Calculate proposed and reference vectors for dissipation
-            V propVector = neighbor._position - proposedPosition;
-            V refVector = neighbor.referencePosition - _referencePosition;
-            V displacement = propVector - refVector;
-            
-            totalDissipation += _damper.calculateBondDissipation(
-                neighbor._velocity - proposedVelocity,  // Relative velocity
-                displacement,  // Use displacement direction for damping
-                _mass,
-                timeStep
-            );
-        }
+        // Calculate both energy terms
+        auto V_quad = T(0.5) * k * stretch * stretch;
+        auto V_const = T(0.5) * k * c * c;
         
-        // Add potential energy contribution from constant external forces
-        // Note: Negative because forces point in direction of decreasing potential
-        potentialEnergy -= _constantForce.dot(proposedPosition - _referencePosition);
+        // Smooth transition factor (0 to 1)
+        auto alpha = T(1) / (T(1) + exp(T(20) * c * (stretch - c)));
         
-        // Lagrangian = T - V - D
-        return kineticEnergy - potentialEnergy - totalDissipation;
+        // Blend energies smoothly
+        potentialEnergy -= alpha * V_quad + (T(1) - alpha) * V_const;
     }
+    
+    // Dissipation calculation
+    T totalDissipation = T(0);
+    totalDissipation += _damper.calculateGlobalDissipation!(T, typeof(proposedVelocity))(proposedVelocity, _mass, timeStep);
+    
+    foreach (neighbor; neighbors) {
+        // Convert positions to match type of proposedPosition for damping
+        auto propVector = neighbor.position - proposedPosition;
+        auto refVector = neighbor.referencePosition - refPos;
+        auto displacement = propVector - refVector;
+        auto relativeVelocity = neighbor.velocity - proposedVelocity;
+        
+        totalDissipation += _damper.calculateBondDissipation!(T, typeof(relativeVelocity))(
+            relativeVelocity,
+            displacement,
+            _mass,
+            timeStep
+        );
+    }
+    
+    // External force contribution
+    potentialEnergy -= _constantForce.dot(proposedPosition - refPos);
+    
+    return kineticEnergy - potentialEnergy - totalDissipation;
+}
+
+// Modified to use generic implementation
+    double computeLagrangian(const(BondBasedPoint!V)[] neighbors, V proposedPosition, double timeStep) const {
+        return computeLagrangianGeneric!double(neighbors, proposedPosition, timeStep);
+}
+
+// Implement gradient using complex step differentiation
+    V computeLagrangianGradient(const(BondBasedPoint!V)[] neighbors, V proposedPosition, double timeStep) const {
+        import std.complex : Complex; 
+        alias C = Complex!double;
+    
+    const double h = 1e-200;  // Complex step size
+    V result = V.zero();
+    
+    // Compute each component of the gradient using complex-step differentiation
+    for (size_t i = 0; i < V.length; i++) {
+        // Create perturbed position with imaginary step
+        auto perturbedPos = Vector!(C, V.length)();
+        foreach (j; 0..V.length) {
+            perturbedPos[j] = C(proposedPosition[j], j == i ? h : 0);
+        }
+        
+        // Compute Lagrangian with complex step
+        auto lagrangian = computeLagrangianGeneric!C(neighbors, perturbedPos, timeStep);
+        
+        // Extract gradient component from imaginary part
+        result[i] = lagrangian.im / h;
+    }
+    
+    return result;
+}
     
     // Check if a bond is under compression using displacement direction
     private bool isCompressing(const(BondBasedPoint!V) neighbor) const {
@@ -136,40 +173,5 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
         V curVector = neighbor.position - _position;
         V displacement = curVector - refVector;
         return relativeVelocity.dot(displacement) < 0;
-    }
-
-    // Calculate bond force between two points with reversible damage
-    private V bondForce(const(BondBasedPoint!V) neighbor) const {
-        // Calculate reference and current vectors between points
-        V refVector = neighbor.referencePosition - _referencePosition;
-        V curVector = neighbor.position - _position;
-        V displacement = curVector - refVector;  // Calculate displacement once for reuse
-        
-        double refLength = refVector.magnitude();
-        double curLength = curVector.magnitude();
-        enforce(curLength >= PLANCK_LENGTH, "Current bond length is shorter than Planck length");
-        
-        // Calculate stretch
-        double stretch = (curLength - refLength) / refLength;
-        
-        // Reversible damage model: zero force if stretch exceeds critical value
-        if (abs(stretch) > _criticalStretch) {
-            return V.zero();
-        }
-        
-        // Bond force calculation
-        V forceDirection = -displacement.unit();  // Unit vector opposing displacement
-        V elasticForce = forceDirection * (_bondStiffness * stretch);
-        
-        // Add bond damping only during compression
-        if (isCompressing(neighbor)) {
-            return elasticForce + _damper.calculateBondForce(
-                neighbor.velocity - _velocity,
-                displacement,  // Use displacement for damping direction
-                _mass
-            );
-        }
-        
-        return elasticForce;
     }
 }

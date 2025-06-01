@@ -12,7 +12,7 @@ import math.vector;
 
 // Core imports
 import core.integration : LagrangianIntegrator;
-import core.damper : StandardDamper;
+import core.damper : Damper;
 import core.material_body : MaterialBody;
 import core.simulation : simulate, AdaptiveTimeStep;
 import core.optimization : createOptimizer;
@@ -127,7 +127,7 @@ private:
             auto material = loadedData.materials.mergeGroups(point.material_groups);
             
             // Create damper
-            auto damper = new StandardDamper!V(
+            auto damper = new Damper!V(
                 simConfig.horizon,
                 simConfig.damping.mass_time_constant,
                 simConfig.damping.viscosity_time_constant
@@ -179,8 +179,12 @@ private:
             simConfig.time_stepping.max_relative_motion
         );
         
-        // Configure integrator
-        auto integrator = new LagrangianIntegrator!(BondBasedPoint!V, V)(solver);
+        // Configure integrator with derivative settings
+        auto integrator = new LagrangianIntegrator!(BondBasedPoint!V, V)(
+            solver,
+            simConfig.optimization.derivative.method,
+            simConfig.optimization.derivative.finite_difference_order
+        );
 
         // Create output directory if specified
         if (options.output_dir) {

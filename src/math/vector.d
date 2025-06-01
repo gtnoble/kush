@@ -83,9 +83,27 @@ template isSimd(T) {
 }
 
 // Vector type checking
+// Helper template for checking if T can be promoted to Complex!U
+template isPromotableToComplex(T, U) {
+    static if (isComplex!T)
+        enum isPromotableToComplex = is(T == Complex!U);
+    else static if (isNumeric!T)
+        enum isPromotableToComplex = true;
+    else
+        enum isPromotableToComplex = false;
+}
+
 template isVector(V) {
     enum isVector = is(V == Vector!(T, N), T, size_t N);
 }
+
+template ElementType(V) {
+    static if (is(V == Vector!(T, N), T, size_t N))
+        alias ElementType = T;
+}
+
+alias PromotedType(T, U, string op = "*") = typeof(mixin("T() " ~ op ~ " U()"));
+alias PromotedElementType(V, W) = PromotedType!(ElementType!V, ElementType!W); 
 
 // Generic Vector template with compile-time or runtime dimension
 struct Vector(T, size_t N = 0)
@@ -186,12 +204,14 @@ if (isNumeric!T || isComplex!T) {
     }
     
     // Vector element-wise operations
-    Vector!(T, N) opBinary(string op)(const Vector!(T, N) other) const
+    auto opBinary(string op, U)(const Vector!(U, N) other) const
         if (op == "+" || op == "-" || op == "/" || op == "*") {
-        Vector!(T, N) result = Vector!(T, N)(length);
-        static if (isSimd!(typeof(_components))) {
+        static if (isSimd!(typeof(_components)) && U == T) {
+            Vector!(T, N) result = Vector!(T, N)(length);
             result._components = mixin("_components " ~ op ~ " other._components");
+            return result;
         } else {
+            auto result = Vector!(PromotedType!(T, U, op), N)(length);
             assert(length == other.length, "Dimension mismatch");
             result._components[] = mixin("_components[] " ~ op ~ " other._components[]");
         }
@@ -199,20 +219,21 @@ if (isNumeric!T || isComplex!T) {
     }
     
     // vector-scalar operations
-    Vector!(T, N) opBinary(string op)(T scalar) const
-        if (op == "*" || op == "/") {
-        Vector!(T, N) result = Vector!(T, N)(length);
-        static if (isSimd!(typeof(_components))) {
+    auto opBinary(string op, U)(U scalar) const
+        if ((op == "*" || op == "/") && (isNumeric!U || isComplex!U)) {
+        static if (isSimd!(typeof(_components)) && T == U) {
+            Vector!(T, N) result = Vector!(T, N)(length);
             result._components = mixin("_components " ~ op ~ " scalar");
         } else {
+            auto result = Vector!(PromotedType!(T, U, op), N)(length);
             result._components[] = mixin("_components[] " ~ op ~ " scalar");
         }
         return result;
     }
     
     // scalar-vector operations
-    Vector!(T, N) opBinaryRight(string op)(T scalar) const
-        if (op == "*" ) {
+    auto opBinaryRight(string op, U)(U scalar) const
+        if (op == "*" && (isNumeric!U || isComplex!U)) {
         return mixin("this " ~ op ~ " scalar");
     }
 
@@ -244,31 +265,34 @@ if (isNumeric!T || isComplex!T) {
         static if (isSimd!(typeof(_components))) {
             result._components = -_components;
         } else {
-            result._components[] = -_components[];
+            static if (isComplex!T) {
+                result._components[] = _components[] * -1;
+            }
+            else {
+                result._components[] = -_components[];
+            }
         }
         return result;
     }
     
     // Dot product
-    auto dot(const(Vector!(T, N)) other) const {
+    auto dot(U)(const(Vector!(U, N)) other) const {
+        PromotedType!(T, U) sum = PromotedType!(T, U)(0);
         static if (isComplex!T) {
             static if (N > 0) {
-                T sum = T(0);
                 foreach (i; 0..N) {
                     sum += conj(this[i]) * other[i];
                 }
                 return sum;
             } else {
                 assert(length == other.length, "Dimension mismatch");
-                T sum = T(0);
                 foreach (i; 0..length) {
                     sum += conj(this[i]) * other[i];
                 }
                 return sum;
             }
         } else {
-            T sum = 0;
-            auto prod = this.hadamard(other);
+            auto prod = this * other;
             foreach (i; 0..length) {
                 sum += prod[i];
             }
@@ -277,12 +301,7 @@ if (isNumeric!T || isComplex!T) {
     }
     // Magnitude squared
     auto magnitudeSquared() const {
-        static if (isComplex!T) {
-            auto d = dot(this);
-            return d.re;
-        } else {
-            return dot(this);
-        }
+        return dot(this);
     }
     
     // Magnitude
@@ -299,7 +318,7 @@ if (isNumeric!T || isComplex!T) {
     // Unit vector
     Vector!(T, N) unit() const {
         auto mag = magnitude();
-        if (mag > 0) {
+        if (mag != 0) {
             return this * (T(1) / T(mag));
         }
         else {
@@ -347,7 +366,7 @@ if (isNumeric!T || isComplex!T) {
     }
 
     // Hadamard (element-wise) multiplication
-    Vector!(T, N) hadamard(const Vector!(T, N) other) const {
+    auto hadamard(U)(const Vector!(U, N) other) const {
         return this * other;
     }
     
@@ -432,7 +451,7 @@ if (isNumeric!T || isComplex!T) {
     }
 
     // Hadamard (element-wise) division
-    Vector!(T, N) hadamardDiv(const Vector!(T, N) other) const {
+    auto hadamardDiv(U)(const Vector!(U, N) other) const {
         return this / other;
     }
 }

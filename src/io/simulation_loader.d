@@ -20,6 +20,12 @@ struct StepSize {
     }
 }
 
+/// Configuration for position derivatives
+struct DerivativeConfig {
+    string method = "analytical"; // "analytical" or "finite_difference"
+    int finite_difference_order = 2; // 2,4,6,8
+}
+
 /// Parameters for gradient descent optimization
 struct GradientDescent {
     double momentum = 0.9;
@@ -69,6 +75,8 @@ struct OptimizationConfig {
     int max_iterations = 10;
     string solver_type = "gradient_descent";  // "gradient_descent", "parallel_tempering", or "lbfgs"
     GradientDescent gradient_descent;
+    
+    DerivativeConfig derivative;
     
     /// L-BFGS specific settings
     struct LBFGSConfig {
@@ -207,6 +215,24 @@ private OptimizationConfig parseOptimizationConfig(JSONValue json) {
     if ("max_iterations" in json) {
         config.max_iterations = json["max_iterations"].get!int;
         enforce(config.max_iterations > 0, "Max iterations must be positive");
+    }
+    
+    // Parse derivative settings
+    if ("derivative" in json) {
+        auto der = json["derivative"];
+        if ("method" in der) {
+            config.derivative.method = der["method"].get!string;
+            enforce(config.derivative.method == "analytical" || 
+                   config.derivative.method == "finite_difference",
+                "Derivative method must be 'analytical' or 'finite_difference'");
+        }
+        if ("finite_difference_order" in der) {
+            config.derivative.finite_difference_order = der["finite_difference_order"].get!int;
+            enforce(config.derivative.finite_difference_order >= 2 && 
+                   config.derivative.finite_difference_order <= 8 &&
+                   config.derivative.finite_difference_order % 2 == 0,
+                "Finite difference order must be 2, 4, 6, or 8");
+        }
     }
     
     // Parse gradient descent settings

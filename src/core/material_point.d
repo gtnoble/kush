@@ -20,6 +20,7 @@ interface MaterialPoint(T, V) if (isVector!V) {
 
     // Lagrangian calculation
     double computeLagrangian(const(T)[] neighbors, V proposedPosition, double timeStep) const;
+    V computeLagrangianGradient(const(T)[] neighbors, V proposedPosition, double timeStep) const;
     
     // State update methods
     void position(V newPosition);

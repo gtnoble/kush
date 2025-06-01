@@ -429,7 +429,7 @@ class TemperingQueueManager(V) {
 import io.simulation_loader : OptimizationConfig;
 
 /// Create an optimizer based on configuration
-Minimizer!V createOptimizer(V)(
+GradientMinimizer!V createOptimizer(V)(
     const OptimizationConfig config, double horizon
 ) if (isVector!V) {
     if (config.solver_type == "gradient_descent") {
@@ -478,8 +478,7 @@ Minimizer!V createOptimizer(V)(
             config.max_iterations,
             config.lbfgs.memory_size,
             config.lbfgs.initial_step.getEffectiveValue(horizon),
-            totalCPUs,
-            config.lbfgs.finite_difference.order
+            totalCPUs
         );
     }
     throw new Exception("Unknown solver type: " ~ config.solver_type);
@@ -545,13 +544,12 @@ private struct CircularBuffer(T) {
  * }
  */
 // Implementation of L-BFGS optimization as a higher-order function
-Minimizer!V createLBFGSMinimizer(V)(
+GradientMinimizer!V createLBFGSMinimizer(V)(
     double tolerance,
     size_t maxIterations,
     size_t memorySize,
     double initialStep,
-    size_t numWorkers,
-    int finiteDifferenceOrder
+    size_t numWorkers
 ) if (isVector!V) {
     // Store position and gradient differences
     struct Update {
@@ -598,11 +596,12 @@ Minimizer!V createLBFGSMinimizer(V)(
     }
     
     // Return the actual minimizer function
-    return (const OptimizationState!V initialState, ObjectiveFunction!V objective) {
+    return (const OptimizationState!V initialState, 
+            ObjectiveFunction!V objective,
+            PartialDerivativeFunction!V gradientFunction) {
         auto currentState = initialState.dup;
         double currentValue = objective(currentState);
         double previousValue;
-        
         OptimizationState!V currentGradient;
         OptimizationState!V previousState;
         OptimizationState!V previousGradient;
@@ -610,7 +609,7 @@ Minimizer!V createLBFGSMinimizer(V)(
         // Main optimization loop
         for (size_t iter = 0; iter < maxIterations; ++iter) {
             previousValue = currentValue;
-            currentGradient = .calculateGradient!V(currentState, objective, numWorkers, finiteDifferenceOrder);
+            currentGradient = .calculateGradient!V(currentState, gradientFunction, numWorkers);
             
             if (iter > 0) {
                 // Update history
@@ -661,7 +660,7 @@ Minimizer!V createLBFGSMinimizer(V)(
 }
 
 // Coefficients for finite difference calculations of different orders
-private immutable double[][int] DIFFERENCE_COEFFS = [
+public immutable double[][int] DIFFERENCE_COEFFS = [
     // 2nd order
     2: [-0.5, 0.0, 0.5],
     // 4th order
@@ -703,9 +702,8 @@ private double calculatePartialDerivative(V)(
 // Calculate gradient using parallel workers
 private OptimizationState!V calculateGradient(V)(
     const OptimizationState!V state,
-    ObjectiveFunction!V objective,
-    size_t numWorkers,
-    int finiteDifferenceOrder = 2
+    PartialDerivativeFunction!V gradientFunction,
+    size_t numWorkers
 ) if (isVector!V) {
     const size_t numPoints = state.positions.length;
     const size_t numConstraints = state.multipliers.length;
@@ -728,7 +726,7 @@ private OptimizationState!V calculateGradient(V)(
             
             // Process components assigned to this worker
             for (size_t idx = i; idx < state.numComponents; idx += numWorkers) {
-                double derivative = calculatePartialDerivative!V(state, objective, idx, finiteDifferenceOrder);
+                double derivative = gradientFunction(state, idx);
 
                 // Send result for this component
                 auto msg = GradientMessage(i, idx, derivative);
@@ -755,13 +753,47 @@ private OptimizationState!V calculateGradient(V)(
     return result;
 }
 
-// Type for optimization objective functions
+// Type for optimization functions
 alias ObjectiveFunction(V) = double delegate(const OptimizationState!V state);
+alias PartialDerivativeFunction(V) = double delegate(const OptimizationState!V state, size_t componentIndex);
 
-// Function type that performs actual minimization
+// Creates a PartialDerivativeFunction from an ObjectiveFunction using finite differences
+PartialDerivativeFunction!V createFiniteDifferenceGradient(V)(
+    ObjectiveFunction!V objective,
+    int order
+) {
+    return (const OptimizationState!V state, size_t componentIndex) {
+        // Get finite difference coefficients
+        auto coeffs = DIFFERENCE_COEFFS[order];
+        int stencilLength = cast(int)coeffs.length;
+        int halfPoints = (stencilLength - 1) / 2;
+        
+        double step_size = sqrt(double.epsilon) * max(abs(state[componentIndex]), 1);
+        double derivative = 0.0;
+        
+        for (int j = 0; j < stencilLength; j++) {
+            if (coeffs[j] == 0.0) continue;
+            
+            auto eval_state = state.dup();
+            eval_state[componentIndex] += step_size * (j - halfPoints);
+            double eval = objective(eval_state);
+            derivative += coeffs[j] * eval;
+        }
+        
+        return derivative / step_size;
+    };
+}
+
+// Function types that perform minimization
 alias Minimizer(V) = OptimizationState!V delegate(
     const OptimizationState!V initialState,
     ObjectiveFunction!V objective
+);
+
+alias GradientMinimizer(V) = OptimizationState!V delegate(
+    const OptimizationState!V initialState,
+    ObjectiveFunction!V objective,          // For energy evaluation (convergence, line search)
+    PartialDerivativeFunction!V gradientFunction  // For gradient computation
 );
 
 /**
@@ -796,7 +828,7 @@ alias Minimizer(V) = OptimizationState!V delegate(
  * }
  */
 // Implementation of parallel tempering optimization as a higher-order function
-Minimizer!V createParallelTemperingMinimizer(V)(
+GradientMinimizer!V createParallelTemperingMinimizer(V)(
     double tolerance,
     size_t maxIterations,
     size_t numReplicas,
@@ -899,7 +931,9 @@ Minimizer!V createParallelTemperingMinimizer(V)(
     }
 
     // Return the actual minimizer function
-    return (const OptimizationState!V initialState, ObjectiveFunction!V objective) {
+    return (const OptimizationState!V initialState,
+            ObjectiveFunction!V objective,
+            PartialDerivativeFunction!V gradientFunction) { // Added gradientFunction parameter
         // Initialize queue manager
         auto queueManager = new TemperingQueueManager!V();
         scope(exit) queueManager.cleanup();
@@ -1081,7 +1115,7 @@ private struct GradientMessage {
  * - y_{k-1} = g_k - g_{k-1} (change in gradient)
  */
 // Implementation of gradient descent optimization as a higher-order function
-Minimizer!V createGradientDescentMinimizer(V)(
+GradientMinimizer!V createGradientDescentMinimizer(V)(
     double tolerance,
     size_t maxIterations,
     double learningRate,
@@ -1141,7 +1175,9 @@ Minimizer!V createGradientDescentMinimizer(V)(
     }
         
     // Return the actual minimizer function
-    return (const OptimizationState!V initialState, ObjectiveFunction!V objective) {
+    return (const OptimizationState!V initialState,
+            ObjectiveFunction!V objective,
+            PartialDerivativeFunction!V gradientFunction) {
         // Initialize state with velocity
         OptimizationState!V state = initialState.dup;
         OptimizationState!V velocity = OptimizationState!V.zero(initialState.positions.length, initialState.multipliers.length);
@@ -1155,7 +1191,7 @@ Minimizer!V createGradientDescentMinimizer(V)(
         for (size_t iter = 0; iter < maxIterations; ++iter) {
             
             // Calculate gradients
-            auto gradient = .calculateGradient!V(state, objective, numWorkers, finiteDifferenceOrder);
+            auto gradient = .calculateGradient!V(state, gradientFunction, numWorkers);
             
             // Compute total gradient magnitude
             double totalMagnitude = sqrt(gradient.magnitudeSquared());
