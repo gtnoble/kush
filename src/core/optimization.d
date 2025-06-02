@@ -1,45 +1,149 @@
 module core.optimization;
 
-import core.material_point;
 import math.vector;
-import std.math : abs, sqrt, exp;
+import std.math : abs, sqrt, exp, cos;
 import std.math.traits : isNaN;
-import std.algorithm : min, max, map, sum;
-import core.thread : Thread;
-import core.time : dur;
-import std.array;
+import std.algorithm : min, max, startsWith;
 import std.random : uniform01;
 import std.mathspecial : normalDistributionInverse;
 import std.stdio;
-import core.sys.posix.unistd : fork, pid_t, close;
+import core.sys.posix.unistd : fork, pid_t;
 import core.sys.posix.signal : 
-    kill, sigaction, sigaction_t,
-    SIGTERM, SIGABRT, SIGINT, SA_RESTART;
-import core.sys.posix.sys.wait : wait, WIFEXITED, WIFSIGNALED, WEXITSTATUS, WTERMSIG;
+    kill, SIGTERM;
+import core.sys.posix.sys.wait : wait;
 import core.stdc.stdlib : exit;
-import std.conv : to;
 import std.format : format;
-import core.stdc.errno;
-import core.stdc.string : strerror;
 import std.parallelism : totalCPUs;
 import std.process : thisProcessID;
-import std.string : fromStringz;
 import std.uuid : randomUUID;
-import std.file : remove;
 import std.exception : enforce;
+import std.conv : to;
 import jumbomessage;
+import io.simulation_loader : OptimizationConfig;
 
-enum ReadyStatus {
-    ReadyToRead = 0,
-    ReadyToWrite = 1,
-    ReadyToReadWrite = 2,
-    NotReady = 3
+// Helper function to calculate BB step size
+private double calculateBBStepSize(
+    const DynamicVector!double gradient,
+    const DynamicVector!double state,
+    const DynamicVector!double previousGradient,
+    const DynamicVector!double previousState,
+    GradientUpdateMode updateMode
+) {
+    auto s = state - previousState;          // Change in position
+    auto y = gradient - previousGradient;    // Change in gradient
+    
+    double s_dot_y = s.dot(y);  // s^T y
+    double y_dot_y = y.dot(y);  // y^T y
+    double s_dot_s = s.dot(s);  // s^T s
+    
+    double bb1 = s_dot_y / y_dot_y;  // BB1 step size
+    double bb2 = s_dot_s / s_dot_y;  // BB2 step size
+    
+    if (isNaN(bb1) && isNaN(bb2)) {
+        return 0;
+    }
+    else if (isNaN(bb1)) {
+        return bb2;
+    }
+    else if (isNaN(bb2)) {
+        return bb1;
+    }
+    
+    // Auto mode selection based on which step gives better descent direction
+    if (updateMode == GradientUpdateMode.BBAuto) {
+        // Choose BB2 if oscillating (indicated by negative s_dot_y)
+        return (s_dot_y < 0) ? bb2 : bb1;
+    }
+    else if (updateMode == GradientUpdateMode.BB1) {
+        return bb1;
+    }
+    else if (updateMode == GradientUpdateMode.BB2) {
+        return bb2;
+    }
+    else {
+        assert(0, "Invalid update mode");
+    }
 }
-
 
 // Helper for normal distribution sampling
 private double normal(double mean, double stddev) {
     return mean + stddev * normalDistributionInverse(uniform01());
+}
+
+// Test ProcessManager
+unittest {
+    auto manager = new ProcessManager(2);
+    assert(manager._pids.length == 2);  // Check array initialization
+}
+
+// Test GradientMessage serialization
+unittest {
+    // Create a test message
+    auto msg = GradientMessage(1, 2, 3.14);
+
+    // Convert to bytes
+    auto bytes = msg.toBytes();
+
+    // Convert back and verify
+    auto recovered = GradientMessage.fromBytes(bytes);
+    assert(recovered.workerId == 1, "WorkerId not preserved in serialization");
+    assert(recovered.index == 2, "Index not preserved in serialization");
+    assert(abs(recovered.value - 3.14) < 1e-10, "Value not preserved in serialization");
+}
+
+// Test WorkerInput and WorkerResult
+unittest {
+    // Test WorkerInput serialization
+    {
+        auto state = DynamicVector!double([1.0, 2.0, 3.0]);
+        auto input = WorkerInput!(DynamicVector!double)(state, 10.5, 0.5);  // state, energy, temperature
+        
+        // Convert to bytes
+        auto bytes = input.toBytes();
+        
+        // Convert back and verify
+        auto recovered = WorkerInput!(DynamicVector!double).fromBytes(bytes);
+        assert(recovered.state.length == 3);
+        assert(abs(recovered.state[0] - 1.0) < 1e-10);
+        assert(abs(recovered.state[1] - 2.0) < 1e-10);
+        assert(abs(recovered.state[2] - 3.0) < 1e-10);
+        assert(abs(recovered.energy - 10.5) < 1e-10);
+        assert(abs(recovered.temperature - 0.5) < 1e-10);
+    }
+
+    // Test WorkerResult serialization
+    {
+        auto state = DynamicVector!double([4.0, 5.0, 6.0]);
+        auto result = WorkerResult!(DynamicVector!double)(state, 20.5);  // state, energy
+        
+        // Convert to bytes
+        auto bytes = result.toBytes();
+        
+        // Convert back and verify
+        auto recovered = WorkerResult!(DynamicVector!double).fromBytes(bytes);
+        assert(recovered.state.length == 3);
+        assert(abs(recovered.state[0] - 4.0) < 1e-10);
+        assert(abs(recovered.state[1] - 5.0) < 1e-10);
+        assert(abs(recovered.state[2] - 6.0) < 1e-10);
+        assert(abs(recovered.energy - 20.5) < 1e-10);
+    }
+}
+
+// Test TemperingQueueManager
+unittest {
+    auto manager = new TemperingQueueManager!(DynamicVector!double)();
+    
+    // Test queue name generation
+    assert(manager.getInputQueueName().startsWith("tempering_input_"));
+    assert(manager.getResultsQueueName().startsWith("tempering_results_"));
+    
+    // Test queue initialization
+    manager.initialize();
+    assert(manager.getInputQueue() !is null);
+    assert(manager.getResultsQueue() !is null);
+    
+    // Test cleanup
+    manager.cleanup();
 }
 
 /**
@@ -82,218 +186,8 @@ class ProcessManager {
         }
 }
 
-/// Unified state type that encapsulates both positions and multipliers
-struct OptimizationState(V) {
-    V[] positions;  // Current positions
-    DynamicVector!double multipliers;  // Vector of multipliers for constraints
-
-    // Total number of scalar components (positions * V.length + multipliers.length)
-    size_t numComponents() const {
-        return positions.length * V.length + multipliers.length;
-    }
-
-    // Get component by linear index
-    double opIndex(size_t index) const {
-        if (index < positions.length * V.length) {
-            size_t pointIndex = index / V.length;
-            size_t dimIndex = index % V.length;
-            return positions[pointIndex][dimIndex];
-        }
-        return multipliers[index - positions.length * V.length];
-    }
-
-    // Set component by linear index
-    double opIndexOpAssign(string op)(double value, size_t index)
-        if (op == "+" || op == "-" || op == "*" || op == "/")
-    {
-        if (index < positions.length * V.length) {
-            size_t pointIndex = index / V.length;
-            size_t dimIndex = index % V.length;
-            static if (op == "+") 
-                positions[pointIndex][dimIndex] += value;
-            else static if (op == "-") 
-                positions[pointIndex][dimIndex] -= value;
-            else static if (op == "*") 
-                positions[pointIndex][dimIndex] *= value;
-            else static if (op == "/") 
-                positions[pointIndex][dimIndex] /= value;
-        } else {
-            size_t multiplierIndex = index - positions.length * V.length;
-            static if (op == "+") 
-                multipliers[multiplierIndex] += value;
-            else static if (op == "-") 
-                multipliers[multiplierIndex] -= value;
-            else static if (op == "*") 
-                multipliers[multiplierIndex] *= value;
-            else static if (op == "/") 
-                multipliers[multiplierIndex] /= value;
-        }
-        return opIndex(index);
-    }
-
-    // Basic assignment
-    double opIndexAssign(double value, size_t index) {
-        if (index < positions.length * V.length) {
-            size_t pointIndex = index / V.length;
-            size_t dimIndex = index % V.length;
-            positions[pointIndex][dimIndex] = value;
-        } else {
-            multipliers[index - positions.length * V.length] = value;
-        }
-        return value;
-    }
-
-    this(V[] pos, size_t numConstraints) {
-        positions = pos;
-        multipliers = DynamicVector!double(numConstraints);
-    }
-    
-    this(V[] pos, DynamicVector!double mult) {
-        positions = pos;
-        multipliers = mult;
-    }
-
-    OptimizationState!V dup() const {
-        auto result = OptimizationState!V(positions.dup, multipliers.dup);
-        return result;
-    }
-
-    OptimizationState!V opBinary(string op)(const OptimizationState!V other) const
-        if (op == "+" || op == "-")
-    {
-        assert(numComponents == other.numComponents, "Dimension mismatch");
-        auto result = OptimizationState!V(new V[positions.length], multipliers.length);
-        static if (op == "+") {
-            foreach (i; 0..positions.length) {
-                result.positions[i] = positions[i] + other.positions[i];
-            }
-            result.multipliers = multipliers + other.multipliers;
-        } else static if (op == "-") {
-            foreach (i; 0..positions.length) {
-                result.positions[i] = positions[i] - other.positions[i];
-            }
-            result.multipliers = multipliers - other.multipliers;
-        }
-        return result;
-    }
-
-    OptimizationState!V opBinary(string op)(double scalar) const
-        if (op == "*" || op == "/")
-    {
-        auto result = OptimizationState!V(new V[positions.length], multipliers.length);
-        static if (op == "*") {
-            foreach (i; 0..positions.length) {
-                result.positions[i] = positions[i] * scalar;
-            }
-            result.multipliers = multipliers * scalar;
-        } else static if (op == "/") {
-            foreach (i; 0..positions.length) {
-                result.positions[i] = positions[i] / scalar;
-            }
-            result.multipliers = multipliers / scalar;
-        }
-        return result;
-    }
-
-    double magnitudeSquared() const {
-        double total = 0.0;
-        foreach (pos; positions) {
-            total += pos.magnitudeSquared();
-        }
-        total += multipliers.magnitudeSquared();
-        return total;
-    }
-    
-    double magnitude() const {
-        return sqrt(magnitudeSquared());
-    }
-
-    // Calculate dot product with another state
-    double dot(const OptimizationState!V other) const {
-        double result = 0.0;
-        foreach (i; 0..numComponents) {
-            result += this[i] * other[i];
-        }
-        return result;
-    }
-
-    static OptimizationState!V zero(size_t numPositions, size_t numConstraints = 0) {
-        auto result = OptimizationState!V(new V[numPositions], DynamicVector!double.zero(numConstraints));
-        foreach (ref pos; result.positions) {
-            pos = V.zero();
-        }
-        // multipliers initialized to zero by default
-        return result;
-    }
-
-    ubyte[] toBytes() const {
-        ubyte[] buffer;
-        
-        // Add canary value
-        buffer ~= cast(ubyte)42;
-        
-        // Serialize positions array size
-        size_t size = positions.length;
-        buffer ~= cast(ubyte[])(&size)[0..1];
-        
-        // Serialize each position vector
-        foreach (pos; positions) {
-            buffer ~= pos.toBytes();
-        }
-        
-        // Serialize multipliers vector
-        buffer ~= multipliers.toBytes();
-        
-        return buffer;
-    }
-
-    void send(JumboMessageQueue queue) const {
-        queue.send(this.toBytes());
-    }
-        
-    static size_t fromBytes(ubyte[] data, ref OptimizationState!V target) {
-        size_t offset = 0;
-        
-        // Check canary value
-        enforce(data[0] == 42, "Invalid canary value in serialized OptimizationState");
-        offset += 1;
-        
-        // Read positions array size
-        size_t size = *cast(size_t*)(data.ptr + offset);
-        offset += size_t.sizeof;
-        
-        // Create new positions array and deserialize
-        auto positions = new V[size];
-        foreach (i; 0..size) {
-            offset += V.fromBytes(data[offset..$], positions[i]);
-        }
-        
-        // Create and deserialize new multipliers
-        auto multipliers = DynamicVector!double(0);
-        offset += DynamicVector!double.fromBytes(data[offset..$], multipliers);
-        
-        // Create new state using constructor
-        target = OptimizationState!V(positions, multipliers);
-        
-        return offset;
-    }
-
-    static OptimizationState!V fromBytes(ubyte[] data) {
-        OptimizationState!V result;
-        fromBytes(data, result);
-        return result;
-    }
-
-    static OptimizationState!V receive(JumboMessageQueue queue) {
-        return fromBytes(queue.receive());
-    }
-}
-
-// Replica configuration now uses the unified state type
-private alias ReplicaConfiguration(V) = OptimizationState!V;
-
 private struct WorkerInput(V) {
-    OptimizationState!V state;
+    DynamicVector!double state;
     double energy;
     double temperature;
 
@@ -301,8 +195,7 @@ private struct WorkerInput(V) {
         ubyte[] buffer;
 
         // Serialize current state
-        auto stateBytes = state.toBytes();
-        buffer ~= stateBytes;
+        buffer ~= state.toBytes();
 
         // Serialize energy and temperature
         buffer ~= cast(ubyte[])(&energy)[0..1];
@@ -313,10 +206,10 @@ private struct WorkerInput(V) {
 
     static WorkerInput!V fromBytes(ubyte[] data) {
         size_t offset = 0;
-        OptimizationState!V state;
+        DynamicVector!double state;
         
-        // Deserialize state using reference method
-        offset += OptimizationState!V.fromBytes(data, state);
+        // Deserialize state
+        offset += DynamicVector!double.fromBytes(data, state);
         
         // Read energy and temperature
         double energy = *cast(double*)(data.ptr + offset);
@@ -336,15 +229,14 @@ private struct WorkerInput(V) {
 }
 
 private struct WorkerResult(V) {
-    OptimizationState!V state;
+    DynamicVector!double state;
     double energy;
 
     ubyte[] toBytes() {
         ubyte[] buffer;
         
         // Serialize state
-        auto stateBytes = state.toBytes();
-        buffer ~= stateBytes;
+        buffer ~= state.toBytes();
 
         // Serialize energy
         buffer ~= cast(ubyte[])(&energy)[0..1];
@@ -354,10 +246,10 @@ private struct WorkerResult(V) {
 
     static WorkerResult!V fromBytes(ubyte[] data) {
         size_t offset = 0;
-        OptimizationState!V state;
+        DynamicVector!double state;
         
-        // Deserialize state using reference method
-        offset += OptimizationState!V.fromBytes(data, state);
+        // Deserialize state
+        offset += DynamicVector!double.fromBytes(data, state);
         
         // Read energy
         double energy = *cast(double*)(data.ptr + offset);
@@ -371,6 +263,187 @@ private struct WorkerResult(V) {
 
     static WorkerResult!V receive(JumboMessageQueue queue) {
         return fromBytes(queue.receive());
+    }
+}
+
+// Test parallel tempering temperature management and replica handling
+unittest {
+    // Test temperature initialization
+    {
+        size_t numReplicas = 4;
+        double minTemp = 0.1;
+        double maxTemp = 2.0;
+        
+        auto temps = (new class {
+            double[] initializeTemperatures() {
+                import std.math : pow;
+                auto temperatures = new double[numReplicas];
+                double ratio = pow(maxTemp / minTemp, 1.0 / (numReplicas - 1));
+                foreach (i; 0..numReplicas) {
+                    temperatures[i] = minTemp * pow(ratio, i);
+                }
+                return temperatures;
+            }
+        }).initializeTemperatures();
+        
+        // Check temperature bounds
+        assert(abs(temps[0] - minTemp) < 1e-10, "Incorrect minimum temperature");
+        assert(abs(temps[$-1] - maxTemp) < 1e-10, "Incorrect maximum temperature");
+        
+        // Check geometric spacing
+        double ratio = temps[1] / temps[0];
+        foreach(i; 1..temps.length-1) {
+            assert(abs(temps[i+1] / temps[i] - ratio) < 1e-10,
+                "Temperatures not geometrically spaced");
+        }
+    }
+    
+    // Test temperature reordering
+    {
+        // Mock temperature and energy arrays
+        double[] temps = [0.1, 0.3, 0.9, 2.0];  // Initial temperatures
+        double[] energies = [5.0, 2.0, 8.0, 1.0];  // Energies of replicas
+        
+        // Create test reordering function
+        auto reorder = (new class {
+            double[] reorderTemperatures(double[] temperatures, double[] energies) {
+                import std.algorithm : sort;
+                
+                struct StateEnergy {
+                    size_t stateIndex;
+                    double energy;
+                }
+                
+                auto allStates = new StateEnergy[temperatures.length];
+                foreach (i; 0..temperatures.length) {
+                    allStates[i] = StateEnergy(i, energies[i]);
+                }
+                
+                sort!((a, b) => a.energy < b.energy)(allStates);
+                
+                auto newTemps = new double[temperatures.length];
+                foreach (i; 0..temperatures.length) {
+                    newTemps[allStates[i].stateIndex] = temperatures[i];
+                }
+                
+                return newTemps;
+            }
+        }).reorderTemperatures(temps, energies);
+        
+        // Check reordering - lowest energy should get lowest temperature
+        assert(abs(reorder[3] - 0.1) < 1e-10,  // State with energy 1.0 gets lowest temp
+            "Incorrect temperature assignment for lowest energy state");
+        assert(abs(reorder[1] - 0.3) < 1e-10,  // State with energy 2.0 gets second lowest
+            "Incorrect temperature assignment for second lowest energy state");
+        assert(abs(reorder[0] - 0.9) < 1e-10,  // State with energy 5.0
+            "Incorrect temperature assignment for third lowest energy state");
+        assert(abs(reorder[2] - 2.0) < 1e-10,  // State with energy 8.0 gets highest temp
+            "Incorrect temperature assignment for highest energy state");
+    }
+}
+
+// Test L-BFGS optimization on standard test functions
+unittest {
+    // Test on simple quadratic function
+    {
+        // f(x) = x^T x (minimum at origin)
+        auto objective = delegate (const DynamicVector!double x) => x.dot(x);
+        
+        // Initialize with point away from minimum
+        auto x0 = DynamicVector!double([1.0, 1.0]);
+        auto config = OptimizationConfig();
+        config.solver_type = "lbfgs";
+        config.tolerance = 1e-6;
+        config.max_iterations = 100;
+        config.lbfgs.memory_size = 5;
+        config.lbfgs.initial_step.value = 1.0;
+        
+        auto optimizer = createOptimizer!(DynamicVector!double)(config, 1.0);
+        auto gradient = createFiniteDifferenceGradient(objective, 2);
+        
+        // Optimize
+        auto result = optimizer(x0, objective, gradient);
+        
+        // Check convergence to origin
+        assert(abs(result[0]) < 1e-5 && abs(result[1]) < 1e-5,
+            "L-BFGS failed to converge to minimum");
+    }
+    
+    // Test on Rosenbrock function
+    {
+        // f(x,y) = (1-x)^2 + 100(y-x^2)^2 (minimum at [1,1])
+        auto objective = delegate (const DynamicVector!double x) {
+            double term1 = (1.0 - x[0]) * (1.0 - x[0]);
+            double term2 = 100.0 * (x[1] - x[0] * x[0]) * (x[1] - x[0] * x[0]);
+            return term1 + term2;
+        };
+        
+        auto x0 = DynamicVector!double([-1.0, 2.0]);
+        auto config = OptimizationConfig();
+        config.solver_type = "lbfgs";
+        config.tolerance = 1e-6;
+        config.max_iterations = 1000;
+        config.lbfgs.memory_size = 10;
+        config.lbfgs.initial_step.value = 0.1;
+        
+        auto optimizer = createOptimizer!(DynamicVector!double)(config, 1.0);
+        auto gradient = createFiniteDifferenceGradient(objective, 4);
+        
+        // Optimize
+        auto result = optimizer(x0, objective, gradient);
+        
+        // Check convergence to [1,1]
+        assert(abs(result[0] - 1.0) < 1e-4 && abs(result[1] - 1.0) < 1e-4,
+            "L-BFGS failed to find Rosenbrock minimum");
+    }
+}
+
+// Test CircularBuffer and createOptimizer
+unittest {
+    // Test CircularBuffer
+    {
+        auto buffer = CircularBuffer!int(3);
+        
+        // Test initial state
+        assert(buffer.length == 0);
+        assert(buffer.capacity == 3);
+        
+        // Test pushing elements
+        buffer.push(1);
+        assert(buffer.length == 1);
+        assert(buffer[0] == 1);
+        
+        buffer.push(2);
+        buffer.push(3);
+        assert(buffer.length == 3);
+        assert(buffer[0] == 3);  // Most recent
+        assert(buffer[1] == 2);
+        assert(buffer[2] == 1);  // Oldest
+        
+        // Test wrapping around
+        buffer.push(4);
+        assert(buffer.length == 3);
+        assert(buffer[0] == 4);
+        assert(buffer[1] == 3);
+        assert(buffer[2] == 2);
+        
+        // Test clear
+        buffer.clear();
+        assert(buffer.length == 0);
+        assert(buffer.capacity == 3);
+    }
+    
+    // Test createOptimizer error handling
+    {
+        auto config = OptimizationConfig();
+        config.solver_type = "invalid_solver";
+        
+        try {
+            auto optimizer = createOptimizer!(DynamicVector!double)(config, 1.0);
+            assert(false, "Should have thrown exception for invalid solver type");
+        } catch (Exception e) {
+            assert(e.msg == "Unknown solver type: invalid_solver");
+        }
     }
 }
 
@@ -429,7 +502,7 @@ class TemperingQueueManager(V) {
 import io.simulation_loader : OptimizationConfig;
 
 /// Create an optimizer based on configuration
-GradientMinimizer!V createOptimizer(V)(
+GradientMinimizer createOptimizer(V)(
     const OptimizationConfig config, double horizon
 ) if (isVector!V) {
     if (config.solver_type == "gradient_descent") {
@@ -544,7 +617,7 @@ private struct CircularBuffer(T) {
  * }
  */
 // Implementation of L-BFGS optimization as a higher-order function
-GradientMinimizer!V createLBFGSMinimizer(V)(
+GradientMinimizer createLBFGSMinimizer(V)(
     double tolerance,
     size_t maxIterations,
     size_t memorySize,
@@ -553,16 +626,16 @@ GradientMinimizer!V createLBFGSMinimizer(V)(
 ) if (isVector!V) {
     // Store position and gradient differences
     struct Update {
-        OptimizationState!V s;  // Position difference
-        OptimizationState!V y;  // Gradient difference
+        DynamicVector!double s;  // Position difference
+        DynamicVector!double y;  // Gradient difference
         double rho;            // 1 / (y^T s)
     }
     
     auto history = CircularBuffer!Update(memorySize);
     
     // Calculate two-loop recursion direction
-    OptimizationState!V twoLoopRecursion(
-        const OptimizationState!V gradient,
+    DynamicVector!double twoLoopRecursion(
+        const DynamicVector!double gradient,
         const CircularBuffer!Update history
     ) {
         auto q = gradient.dup;
@@ -596,15 +669,15 @@ GradientMinimizer!V createLBFGSMinimizer(V)(
     }
     
     // Return the actual minimizer function
-    return (const OptimizationState!V initialState, 
-            ObjectiveFunction!V objective,
-            PartialDerivativeFunction!V gradientFunction) {
+    return (const DynamicVector!double initialState, 
+            ObjectiveFunction objective,
+            PartialDerivativeFunction gradientFunction) {
         auto currentState = initialState.dup;
         double currentValue = objective(currentState);
         double previousValue;
-        OptimizationState!V currentGradient;
-        OptimizationState!V previousState;
-        OptimizationState!V previousGradient;
+        DynamicVector!double currentGradient;
+        DynamicVector!double previousState;
+        DynamicVector!double previousGradient;
         
         // Main optimization loop
         for (size_t iter = 0; iter < maxIterations; ++iter) {
@@ -636,11 +709,8 @@ GradientMinimizer!V createLBFGSMinimizer(V)(
             
             debug {
                 writefln(
-                    "Gradient Magnitude: %s, Position Partial Gradient: %s, Multiplier Value: %s, Multiplier Partial Gradient: %s, Lagrangian: %s", 
+                    "Gradient Magnitude: %s, Lagrangian: %s", 
                     currentGradient.magnitude, 
-                    currentGradient.positions.map!((value) => value.magnitudeSquared).sum.sqrt,
-                    currentState.multipliers.magnitude,
-                    currentGradient.multipliers.magnitude,
                     currentValue
                 );
             }
@@ -659,6 +729,139 @@ GradientMinimizer!V createLBFGSMinimizer(V)(
     };
 }
 
+// Test gradient descent optimization
+unittest {
+    
+    // Test different update modes
+    {
+        // Rastrigin function (multimodal test function)
+        auto objective = delegate (const DynamicVector!double x) {
+            import std.math : PI;
+            double sum = 0.0;
+            foreach (i; 0..x.length) {
+                sum += x[i] * x[i] - 10 * cos(2 * PI * x[i]);
+            }
+            return 10 * x.length + sum;
+        };
+        
+        auto x0 = DynamicVector!double([3.0, -2.0]);
+        auto config = OptimizationConfig();
+        config.solver_type = "gradient_descent";
+        config.tolerance = 1e-6;
+        config.max_iterations = 1000;
+        
+        // Test StepSize mode
+        {
+            config.gradient_descent.gradient_mode = "step_size";
+            config.gradient_descent.gradient_step_size.value = 0.01;
+            auto optimizer = createOptimizer!(DynamicVector!double)(config, 1.0);
+            auto gradient = createFiniteDifferenceGradient(objective, 4);
+            auto result = optimizer(x0, objective, gradient);
+            
+            // Should find local minimum
+            assert(objective(result) < objective(x0), 
+                "Step size mode failed to improve objective");
+        }
+        
+        // Test BB-Auto mode
+        {
+            config.gradient_descent.gradient_mode = "bb-auto";
+            config.gradient_descent.initial_step.value = 0.1;
+            auto optimizer = createOptimizer!(DynamicVector!double)(config, 1.0);
+            auto gradient = createFiniteDifferenceGradient(objective, 4);
+            auto result = optimizer(x0, objective, gradient);
+            
+            // Should find local minimum
+            assert(objective(result) < objective(x0), 
+                "BB-Auto mode failed to improve objective");
+        }
+    }
+}
+
+// Test BB step size calculation
+unittest {
+    // Create test vectors
+    auto state = DynamicVector!double([1.0, 2.0]);
+    auto prevState = DynamicVector!double([0.0, 0.0]);
+    auto grad = DynamicVector!double([2.0, 4.0]);
+    auto prevGrad = DynamicVector!double([0.0, 0.0]);
+    
+    // Test BB1 mode
+    double step = calculateBBStepSize(
+        grad, state, prevGrad, prevState,
+        GradientUpdateMode.BB1
+    );
+    assert(abs(step - 0.5) < 1e-10,  // (s^T y)/(y^T y) = 10/20 = 0.5
+        "BB1 step size incorrect");
+    
+    // Test BB2 mode
+    step = calculateBBStepSize(
+        grad, state, prevGrad, prevState,
+        GradientUpdateMode.BB2
+    );
+    assert(abs(step - 0.5) < 1e-10,  // (s^T s)/(s^T y) = 5.0/10.0 = 0.5
+        "BB2 step size incorrect");
+    
+    // Test auto mode with oscillation (s^T y < 0)
+    grad = DynamicVector!double([-2.0, -4.0]);  // Reverse gradient direction
+    step = calculateBBStepSize(
+        grad, state, prevGrad, prevState,
+        GradientUpdateMode.BBAuto
+    );
+    assert(abs(step - (-0.5)) < 1e-10,  // Should choose BB2 for oscillation: (s^T s)/(s^T y) = 5.0/(-10.0) = -0.5
+        "Auto mode did not choose BB2 for oscillation");
+}
+
+// Test finite difference gradient calculations
+unittest {
+    // Test gradient calculation on a simple quadratic function
+    auto objective = delegate (const DynamicVector!double x) => x.dot(x);  // f(x) = x^T x
+    
+    // Create gradients with different orders
+    foreach (order; [2, 4, 6, 8]) {
+        auto gradient = createFiniteDifferenceGradient(objective, order);
+        
+        // Test at point [1, 2, 3]
+        auto x = DynamicVector!double([1.0, 2.0, 3.0]);
+        foreach (i; 0..3) {
+            // Analytical gradient of x^T x is 2x
+            double expected = 2.0 * x[i];
+            double computed = gradient(x, i);
+            
+            // Higher order methods should be more accurate
+            double tolerance = 1e-6;  // Adjust based on order
+            assert(abs(computed - expected) < tolerance,
+                "Gradient error too large for order " ~ order.to!string);
+        }
+    }
+}
+
+// Test DIFFERENCE_COEFFS properties
+unittest {
+    // Test coefficient sums (should be 0 for all orders)
+    foreach (order; [2, 4, 6, 8]) {
+        double sum = 0.0;
+        foreach (coeff; DIFFERENCE_COEFFS[order]) {
+            sum += coeff;
+        }
+        assert(abs(sum) < 1e-10, 
+            "Coefficients for order " ~ order.to!string ~ " do not sum to 0");
+    }
+    
+    // Test symmetry
+    foreach (order; [2, 4, 6, 8]) {
+        auto coeffs = DIFFERENCE_COEFFS[order];
+        size_t n = coeffs.length;
+        for (size_t i = 0; i < n/2; i++) {
+            assert(abs(coeffs[i] + coeffs[n-1-i]) < 1e-10, 
+                "Coefficients not antisymmetric for order " ~ order.to!string);
+        }
+        // Middle coefficient should be 0
+        assert(abs(coeffs[n/2]) < 1e-10, 
+            "Middle coefficient not 0 for order " ~ order.to!string);
+    }
+}
+
 // Coefficients for finite difference calculations of different orders
 public immutable double[][int] DIFFERENCE_COEFFS = [
     // 2nd order
@@ -672,12 +875,12 @@ public immutable double[][int] DIFFERENCE_COEFFS = [
 ];
 
 // Calculate a single partial derivative using finite differences
-private double calculatePartialDerivative(V)(
-    const OptimizationState!V state,
-    ObjectiveFunction!V objective,
+private double calculatePartialDerivative(
+    const DynamicVector!double state,
+    ObjectiveFunction objective,
     size_t componentIndex,
     int finiteDifferenceOrder
-) if (isVector!V) {
+) {
     // Get finite difference coefficients for current order
     auto coeffs = DIFFERENCE_COEFFS[finiteDifferenceOrder];
     int stencilLength = cast(int)coeffs.length;
@@ -690,7 +893,7 @@ private double calculatePartialDerivative(V)(
     for (int j = 0; j < stencilLength; j++) {
         if (coeffs[j] == 0.0) continue;  // Skip center point if coefficient is 0
         
-        auto eval_state = state.dup();
+        auto eval_state = state.dup;
         eval_state[componentIndex] += step_size * (j - halfPoints);
         double eval = objective(eval_state);
         derivative += coeffs[j] * eval;
@@ -700,14 +903,12 @@ private double calculatePartialDerivative(V)(
 }
 
 // Calculate gradient using parallel workers
-private OptimizationState!V calculateGradient(V)(
-    const OptimizationState!V state,
-    PartialDerivativeFunction!V gradientFunction,
+private DynamicVector!double calculateGradient(V)(
+    const DynamicVector!double state,
+    PartialDerivativeFunction gradientFunction,
     size_t numWorkers
 ) if (isVector!V) {
-    const size_t numPoints = state.positions.length;
-    const size_t numConstraints = state.multipliers.length;
-    auto result = OptimizationState!V.zero(numPoints, numConstraints);
+    auto result = DynamicVector!double.zero(state.length);
 
     // Create queue for gradient components
     string queueName = format("/gradient_%d_%s", 
@@ -725,7 +926,7 @@ private OptimizationState!V calculateGradient(V)(
             auto queue = new JumboMessageQueue(queueName);
             
             // Process components assigned to this worker
-            for (size_t idx = i; idx < state.numComponents; idx += numWorkers) {
+            for (size_t idx = i; idx < state.length; idx += numWorkers) {
                 double derivative = gradientFunction(state, idx);
 
                 // Send result for this component
@@ -737,7 +938,7 @@ private OptimizationState!V calculateGradient(V)(
     }
 
     // Collect gradient components
-    size_t totalComponents = state.numComponents;
+    size_t totalComponents = state.length;
     for (size_t received = 0; received < totalComponents; received++) {
         auto msg = GradientMessage.receive(gradientQueue);
         result[msg.index] = msg.value;
@@ -754,15 +955,15 @@ private OptimizationState!V calculateGradient(V)(
 }
 
 // Type for optimization functions
-alias ObjectiveFunction(V) = double delegate(const OptimizationState!V state);
-alias PartialDerivativeFunction(V) = double delegate(const OptimizationState!V state, size_t componentIndex);
+alias ObjectiveFunction = double delegate(const DynamicVector!double state);
+alias PartialDerivativeFunction = double delegate(const DynamicVector!double state, size_t componentIndex);
 
 // Creates a PartialDerivativeFunction from an ObjectiveFunction using finite differences
-PartialDerivativeFunction!V createFiniteDifferenceGradient(V)(
-    ObjectiveFunction!V objective,
+PartialDerivativeFunction createFiniteDifferenceGradient(
+    ObjectiveFunction objective,
     int order
 ) {
-    return (const OptimizationState!V state, size_t componentIndex) {
+    return (const DynamicVector!double state, size_t componentIndex) {
         // Get finite difference coefficients
         auto coeffs = DIFFERENCE_COEFFS[order];
         int stencilLength = cast(int)coeffs.length;
@@ -774,7 +975,7 @@ PartialDerivativeFunction!V createFiniteDifferenceGradient(V)(
         for (int j = 0; j < stencilLength; j++) {
             if (coeffs[j] == 0.0) continue;
             
-            auto eval_state = state.dup();
+            auto eval_state = state.dup;
             eval_state[componentIndex] += step_size * (j - halfPoints);
             double eval = objective(eval_state);
             derivative += coeffs[j] * eval;
@@ -785,15 +986,15 @@ PartialDerivativeFunction!V createFiniteDifferenceGradient(V)(
 }
 
 // Function types that perform minimization
-alias Minimizer(V) = OptimizationState!V delegate(
-    const OptimizationState!V initialState,
-    ObjectiveFunction!V objective
+alias Minimizer = DynamicVector!double delegate(
+    const DynamicVector!double initialState,
+    ObjectiveFunction objective
 );
 
-alias GradientMinimizer(V) = OptimizationState!V delegate(
-    const OptimizationState!V initialState,
-    ObjectiveFunction!V objective,          // For energy evaluation (convergence, line search)
-    PartialDerivativeFunction!V gradientFunction  // For gradient computation
+alias GradientMinimizer = DynamicVector!double delegate(
+    const DynamicVector!double initialState,
+    ObjectiveFunction objective,          // For energy evaluation (convergence, line search)
+    PartialDerivativeFunction gradientFunction  // For gradient computation
 );
 
 /**
@@ -828,7 +1029,7 @@ alias GradientMinimizer(V) = OptimizationState!V delegate(
  * }
  */
 // Implementation of parallel tempering optimization as a higher-order function
-GradientMinimizer!V createParallelTemperingMinimizer(V)(
+GradientMinimizer createParallelTemperingMinimizer(V)(
     double tolerance,
     size_t maxIterations,
     size_t numReplicas,
@@ -838,12 +1039,12 @@ GradientMinimizer!V createParallelTemperingMinimizer(V)(
     double proposalStepSize
 ) if (isVector!V) {
     // Helper struct for tracking best solution
-    static struct BestSolution(V) {
-        OptimizationState!V state;
+    static struct BestSolution {
+        DynamicVector!double state;
         double energy = double.infinity;
 
-        this(OptimizationState!V s, double e = double.infinity) {
-            state = s.dup();
+        this(DynamicVector!double s, double e = double.infinity) {
+            state = s.dup;
             energy = e;
         }
     }
@@ -888,7 +1089,7 @@ GradientMinimizer!V createParallelTemperingMinimizer(V)(
     
     // Helper function for worker process management
     void handleWorkerProcess(
-        ObjectiveFunction!V objective,
+        ObjectiveFunction objective,
         string inputQueueName,
         string resultsQueueName,
         double stepSize
@@ -904,8 +1105,8 @@ GradientMinimizer!V createParallelTemperingMinimizer(V)(
                 auto input = WorkerInput!V.receive(inputQueue);
                 
                 // Generate proposal with random walk
-                auto proposedState = input.state.dup();
-                foreach (i; 0..proposedState.numComponents) {
+                auto proposedState = input.state.dup;
+                foreach (i; 0..proposedState.length) {
                     proposedState[i] += normal(0, stepSize);
                 }
                 
@@ -931,9 +1132,9 @@ GradientMinimizer!V createParallelTemperingMinimizer(V)(
     }
 
     // Return the actual minimizer function
-    return (const OptimizationState!V initialState,
-            ObjectiveFunction!V objective,
-            PartialDerivativeFunction!V gradientFunction) { // Added gradientFunction parameter
+    return (const DynamicVector!double initialState,
+            ObjectiveFunction objective,
+            PartialDerivativeFunction gradientFunction) { // Added gradientFunction parameter
         // Initialize queue manager
         auto queueManager = new TemperingQueueManager!V();
         scope(exit) queueManager.cleanup();
@@ -947,7 +1148,7 @@ GradientMinimizer!V createParallelTemperingMinimizer(V)(
         
         // Initialize temperatures and states
         auto replicaTemperatures = initializeTemperatures();
-        auto replicaConfigurations = new ReplicaConfiguration!V[numReplicas];
+        auto replicaConfigurations = new DynamicVector!double[numReplicas];
         auto replicaEnergies = new double[numReplicas];
         
         // Initialize all replicas
@@ -967,7 +1168,7 @@ GradientMinimizer!V createParallelTemperingMinimizer(V)(
         });
         
         // Track best solution
-        auto best = BestSolution!V(initialState.dup, double.infinity);
+        auto best = BestSolution(initialState.dup, double.infinity);
         
         // Main optimization loop
         for (size_t iter = 0; iter < maxIterations; ++iter) {
@@ -991,7 +1192,7 @@ GradientMinimizer!V createParallelTemperingMinimizer(V)(
                 
                 // Update best solution if needed
                 if (result.energy < best.energy) {
-                    best = BestSolution!V(result.state, result.energy);
+                    best = BestSolution(result.state, result.energy);
                 }
             }
             
@@ -1115,7 +1316,7 @@ private struct GradientMessage {
  * - y_{k-1} = g_k - g_{k-1} (change in gradient)
  */
 // Implementation of gradient descent optimization as a higher-order function
-GradientMinimizer!V createGradientDescentMinimizer(V)(
+GradientMinimizer createGradientDescentMinimizer(V)(
     double tolerance,
     size_t maxIterations,
     double learningRate,
@@ -1131,10 +1332,10 @@ GradientMinimizer!V createGradientDescentMinimizer(V)(
         
     // Helper function to calculate BB step size
     double calculateBBStepSize(
-        const OptimizationState!V gradient,
-        const OptimizationState!V state,
-        const OptimizationState!V previousGradient,
-        const OptimizationState!V previousState,
+        const DynamicVector!double gradient,
+        const DynamicVector!double state,
+        const DynamicVector!double previousGradient,
+        const DynamicVector!double previousState,
         GradientUpdateMode updateMode
     ) {
         auto s = state - previousState;          // Change in position
@@ -1175,15 +1376,15 @@ GradientMinimizer!V createGradientDescentMinimizer(V)(
     }
         
     // Return the actual minimizer function
-    return (const OptimizationState!V initialState,
-            ObjectiveFunction!V objective,
-            PartialDerivativeFunction!V gradientFunction) {
+    return (const DynamicVector!double initialState,
+            ObjectiveFunction objective,
+            PartialDerivativeFunction gradientFunction) {
         // Initialize state with velocity
-        OptimizationState!V state = initialState.dup;
-        OptimizationState!V velocity = OptimizationState!V.zero(initialState.positions.length, initialState.multipliers.length);
+        DynamicVector!double state = initialState.dup;
+        DynamicVector!double velocity = DynamicVector!double.zero(initialState.length);
 
-        OptimizationState!V previousGradient;
-        OptimizationState!V previousState;
+        DynamicVector!double previousGradient;
+        DynamicVector!double previousState;
         
         double value;
         
@@ -1197,7 +1398,7 @@ GradientMinimizer!V createGradientDescentMinimizer(V)(
             double totalMagnitude = sqrt(gradient.magnitudeSquared());
             
             double step;
-            OptimizationState!V updateDirection;
+            DynamicVector!double updateDirection;
 
             if (mode == GradientUpdateMode.LearningRate) {
                 step = learningRate;
@@ -1231,12 +1432,9 @@ GradientMinimizer!V createGradientDescentMinimizer(V)(
 
             debug {
                 writefln(
-                    "Gradient Magnitude: %s, Step size: %s, Position Partial Gradient: %s, Multiplier Value: %s, Multiplier Partial Gradient: %s, Lagrangian: %s", 
+                    "Gradient Magnitude: %s, Step size: %s, Lagrangian: %s", 
                     totalMagnitude, 
                     step,
-                    gradient.positions.map!((value) => value.magnitudeSquared).sum.sqrt,
-                    state.multipliers.magnitude,
-                    gradient.multipliers.magnitude,
                     value
                 );
             }
