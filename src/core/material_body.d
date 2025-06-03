@@ -265,17 +265,17 @@ class MaterialBody(T, V) if (isMaterialPoint!(T, V)) {
             
             static if (V.length == 1) {
                 auto vel = point.velocity;
-                f.writefln("%g,%g,%g", 
+                f.writefln("%1.17e,%1.17e,%1.17e", 
                     pos[0], ref_pos[0], vel[0]);
             } else static if (V.length == 2) {
                 auto vel = point.velocity;
-                f.writefln("%g,%g,%g,%g,%g,%g",
+                f.writefln("%1.17e,%1.17e,%1.17e,%1.17e,%1.17e,%1.17e",
                     pos[0], pos[1], 
                     ref_pos[0], ref_pos[1],
                     vel[0], vel[1]);
             } else static if (V.length == 3) {
                 auto vel = point.velocity;
-                f.writefln("%g,%g,%g,%g,%g,%g,%g,%g,%g",
+                f.writefln("%15e,%1.17e,%1.17e,%1.17e,%1.17e,%1.17e,%1.17e,%1.17e,%1.17e",
                     pos[0], pos[1], pos[2],
                     ref_pos[0], ref_pos[1], ref_pos[2],
                     vel[0], vel[1], vel[2]);

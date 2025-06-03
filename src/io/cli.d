@@ -146,6 +146,7 @@ private:
             bondedPoints ~= new BondBasedPoint!V(
                 point.position,
                 calculateMass!V(material.density, point.volume),
+                point.volume,
                 calculateBondStiffness!V(material.youngsModulus, simConfig.horizon),
                 material.criticalStretch,
                 damper,
@@ -220,12 +221,6 @@ private:
     // Calculate bond stiffness (derived from elastic properties)
     double calculateBondStiffness(V)(double youngsModulus, double horizon) {
         import std.math : PI;
-        static if (V.length == 1) {
-            return youngsModulus / (horizon * horizon);
-        } else static if (V.length == 2) {
-            return 6.0 * youngsModulus / (PI * horizon * horizon * horizon);
-        } else {
             return 9.0 * youngsModulus / (PI * horizon * horizon * horizon * horizon);
-        }
     }
 }

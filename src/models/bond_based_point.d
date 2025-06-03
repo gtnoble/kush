@@ -4,7 +4,7 @@ import core.material_point;
 import core.damper;
 import core.velocity_constraint : VelocityConstraint;
 import math.vector;
-import std.math : abs, exp;
+import std.math : abs, exp, sinh;
 import std.complex : exp;
 import std.typecons : Nullable;
 import std.exception : enforce;
@@ -19,6 +19,7 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
     private V _referencePosition;
     private V _velocity;
     private double _mass;
+    private double _volume;
     private V _constantForce;  // Store constant external force
     private double _timeElapsed;      // Track simulation time
     private VelocityConstraint!V* _velocityConstraint;  // Velocity constraint (pointer to allow null checks)
@@ -49,6 +50,7 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
     this(
         V refPos,
         double pointMass,
+        double pointVolume,
         double bondStiffness,
         double criticalStretch,
         Damper!V damper,               // Damping strategy
@@ -61,6 +63,7 @@ class BondBasedPoint(V) : MaterialPoint!(BondBasedPoint!V, V)
         _position = refPos;
         _velocity = initialVelocity;
         _mass = pointMass;
+        _volume = pointVolume;
         _bondStiffness = bondStiffness;
         _criticalStretch = criticalStretch;
         _damper = damper;
@@ -99,15 +102,16 @@ T computeLagrangianGeneric(T)(const(BondBasedPoint!V)[] neighbors, Vector!(T, V.
         auto c = T(_criticalStretch);
         auto k = T(_bondStiffness);
         
-        // Calculate both energy terms
-        auto V_quad = T(0.5) * k * stretch * stretch;
-        auto V_const = T(0.5) * k * c * c;
+        // Calculate both energy density terms
+        auto V_quad = T(0.5) * k * stretch * stretch * _volume;
+        auto V_const = T(0.5) * k * c * c * _volume;
         
         // Smooth transition factor (0 to 1)
-        auto alpha = T(1) / (T(1) + exp(T(20) * c * (stretch - c)));
+        //auto alpha = T(1) / (T(1) + exp(T(20) * (stretch - c) / c));
+        auto alpha = T(1);
         
-        // Blend energies smoothly
-        potentialEnergy -= alpha * V_quad + (T(1) - alpha) * V_const;
+        // Blend energies smoothly. Half the bond energy is used to avoid double counting
+        potentialEnergy += _volume * (alpha * V_quad + (T(1) - alpha) * V_const) * 0.5;
     }
     
     // Dissipation calculation
@@ -126,11 +130,11 @@ T computeLagrangianGeneric(T)(const(BondBasedPoint!V)[] neighbors, Vector!(T, V.
             displacement,
             _mass,
             timeStep
-        );
+        ) * 0.5; // Half the dissipation to avoid double counting
     }
     
     // External force contribution
-    potentialEnergy -= _constantForce.dot(proposedPosition - refPos);
+    potentialEnergy += _constantForce.dot(proposedPosition - refPos);
     
     return kineticEnergy - potentialEnergy - totalDissipation;
 }
@@ -146,6 +150,7 @@ T computeLagrangianGeneric(T)(const(BondBasedPoint!V)[] neighbors, Vector!(T, V.
         alias C = Complex!double;
     
     const double h = 1e-200;  // Complex step size
+    //const double h = 1e-19;  // Complex step size
     V result = V.zero();
     
     // Compute each component of the gradient using complex-step differentiation

@@ -683,6 +683,9 @@ GradientMinimizer createLBFGSMinimizer(V)(
         for (size_t iter = 0; iter < maxIterations; ++iter) {
             previousValue = currentValue;
             currentGradient = .calculateGradient!V(currentState, gradientFunction, numWorkers);
+            debug {
+                writefln("Iteration %s: Gradient %s", iter, currentGradient);
+            }
             
             if (iter > 0) {
                 // Update history
@@ -1330,51 +1333,6 @@ GradientMinimizer createGradientDescentMinimizer(V)(
     int finiteDifferenceOrder
 ) if (isVector!V) {
         
-    // Helper function to calculate BB step size
-    double calculateBBStepSize(
-        const DynamicVector!double gradient,
-        const DynamicVector!double state,
-        const DynamicVector!double previousGradient,
-        const DynamicVector!double previousState,
-        GradientUpdateMode updateMode
-    ) {
-        auto s = state - previousState;          // Change in position
-        auto y = gradient - previousGradient;    // Change in gradient
-        
-        double s_dot_y = s.dot(y);  // s^T y
-        double y_dot_y = y.dot(y);  // y^T y
-        double s_dot_s = s.dot(s);  // s^T s
-        
-        double bb1 = s_dot_y / y_dot_y;  // BB1 step size
-        double bb2 = s_dot_s / s_dot_y;  // BB2 step size
-        
-        //enforce(!isNaN(bb1) && !isNaN(bb2), "Invalid BB step sizes");
-        if (isNaN(bb1) && isNaN(bb2)) {
-            return 0;
-        }
-        else if (isNaN(bb1)) {
-            return bb2;
-        }
-        else if (isNaN(bb2)) {
-            return bb1;
-        }
-        
-        // Auto mode selection based on which step gives better descent direction
-        if (updateMode == GradientUpdateMode.BBAuto) {
-            // Choose BB2 if oscillating (indicated by negative s_dot_y)
-            return (s_dot_y < 0) ? bb2 : bb1;
-        }
-        else if (updateMode == GradientUpdateMode.BB1) {
-            return bb1;
-        }
-        else if (updateMode == GradientUpdateMode.BB2) {
-            return bb2;
-        }
-        else {
-            assert(0, "Invalid update mode");
-        }
-    }
-        
     // Return the actual minimizer function
     return (const DynamicVector!double initialState,
             ObjectiveFunction objective,
@@ -1393,6 +1351,9 @@ GradientMinimizer createGradientDescentMinimizer(V)(
             
             // Calculate gradients
             auto gradient = .calculateGradient!V(state, gradientFunction, numWorkers);
+            debug {
+                writefln("Iteration %s: Gradient %s\n State: %s", iter, gradient, state);
+            }
             
             // Compute total gradient magnitude
             double totalMagnitude = sqrt(gradient.magnitudeSquared());
